@@ -11,6 +11,8 @@ conda activate continual_learning
 pip install -r requirements.tx
 ```
 
+To change the location of download dataset, update the variable `DATA_ROOT` inside `utils/data.py`
+
 ## To reproduce results run code of the form
 
 ```
