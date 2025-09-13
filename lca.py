@@ -19,6 +19,8 @@ from helper import (
 from torch.distributions import MultivariateNormal
 import logging
 import sys
+import optuna
+import copy
 
 
 CHECKPOINT_DIR = "checkpoints"
@@ -28,14 +30,16 @@ LOG_DIR = "logs"
 os.makedirs(LOG_DIR, exist_ok=True)
 
 class Learner:
-    def __init__(self, config):
+    def __init__(self, config, trial=None, pruning_thresholds={}):
         self._config = config
         self._known_classes = 0
         self._total_classes = 0
         self._class_increments = []
         self._cur_task = -1
         self._acc_matrix = []
-        self._cls2task = {}
+        self._cls_to_task_idx = {}
+        self.trial = trial
+        self.pruning_thresholds = pruning_thresholds
 
         self.model = Model(config)
         self.model.cuda()
@@ -56,6 +60,18 @@ class Learner:
             self.eval()
             self.after_task()
 
+            if self.trial is not None:
+                dataset_name = self._config["dataset_name"]
+                if dataset_name in self.pruning_thresholds:
+                    thresholds = self.pruning_thresholds[dataset_name]
+                    if task in thresholds:
+                        threshold = thresholds[task]
+                        if self._asa < threshold:
+                            logging.info(
+                                f"[Pruning] ASA {self._asa:.2f} < {threshold:.2f} at task {task + 1}"
+                            )
+                            raise optuna.TrialPruned()
+
     def before_task(self, task, data_manager):
         task_size = data_manager.get_task_size(task)
         self._total_classes = self._known_classes + task_size
@@ -63,7 +79,7 @@ class Learner:
         self._cur_task = task
 
         for clz in range(self._known_classes, self._total_classes):
-            self._cls2task[clz] = self._cur_task
+            self._cls_to_task_idx[clz] = self._cur_task
 
     def after_task(self):
         self._known_classes = self._total_classes
@@ -88,12 +104,13 @@ class Learner:
         y_pred = np.concatenate(y_pred)
         y_true = np.concatenate(y_true)
         acc_total, grouped = accuracy(y_pred.T, y_true, self._class_increments)
-        
-        logging.info(f"[Evaluation] Task {self._cur_task + 1}")
+        grouped = [float(acc) for acc in grouped]
+
+        logging.info(f"[Evaluation] Task {self._cur_task}")
         logging.info(f"[Evaluation] Total Acc: {acc_total:.2f}, Grouped Acc: {grouped}")
 
         self._acc_matrix.append(grouped)
-        
+
         num_tasks = len(self._acc_matrix)
         accuracy_matrix = np.zeros((num_tasks, num_tasks))
         for i in range(num_tasks):
@@ -103,11 +120,15 @@ class Learner:
         faa, ffm, ffd, asa = compute_metrics(accuracy_matrix)
         self._faa = faa
         self._asa = asa
-        self._grouped = grouped 
-        logging.info(f"[Evaluation] FAA: {faa:.2f}, FFM: {ffm:.2f}, FFD: {ffd:.2f}, ASA: {asa:.2f}")
+        self._grouped = grouped
+        logging.info(
+            f"[Evaluation] FAA: {faa:.2f}, FFM: {ffm:.2f}, FFD: {ffd:.2f}, ASA: {asa:.2f}"
+        )
 
     def train(self):
-        self.model.update_classifier(self._total_classes - self._known_classes, freeze_old=True)
+        self.model.update_classifier(
+            self._total_classes - self._known_classes, freeze_old=True
+        )
         self.model.train()
         self.model.cuda()
 
@@ -139,21 +160,27 @@ class Learner:
                 },
                 {
                     "params": [
-                        p for p in self.model.classifier.heads[self._cur_task].parameters() if p.requires_grad
+                        p
+                        for p in self.model.classifier.heads[
+                            self._cur_task
+                        ].parameters()
+                        if p.requires_grad
                     ],
                     "lr": base_lr,
                     "weight_decay": weight_decay,
-                }
+                },
             ]
 
             if self.model.norm is not None:
-                parameters.append({
-                    "params": [
-                        p for p in self.model.norm.parameters() if p.requires_grad
-                    ],
-                    "lr": base_lr,
-                    "weight_decay": weight_decay,
-                })
+                parameters.append(
+                    {
+                        "params": [
+                            p for p in self.model.norm.parameters() if p.requires_grad
+                        ],
+                        "lr": base_lr,
+                        "weight_decay": weight_decay,
+                    }
+                )
 
             optimizer = optim.SGD(
                 parameters, lr=base_lr, momentum=0.9, weight_decay=weight_decay
@@ -162,7 +189,7 @@ class Learner:
                 optimizer, T_max=epochs, eta_min=1e-6
             )
 
-            logging.info(f"[Training] Task {self._cur_task + 1}")
+            logging.info(f"[Training] Task {self._cur_task}")
             logging.info(f"[Training] {self.model}")
 
             for epoch in range(epochs):
@@ -200,7 +227,7 @@ class Learner:
                 self.classifier_checkpoint(self._cur_task),
             )
         else:
-            logging.info(f"[Training] Load checkpoint for task {self._cur_task + 1}")
+            logging.info(f"[Training] Load checkpoint for task {self._cur_task}")
             backbone_params = torch.load(self.backbone_checkpoint(self._cur_task))
             self.load_backbone(backbone_params)
             self.model.classifier.heads[self._cur_task].load_state_dict(
@@ -211,18 +238,22 @@ class Learner:
             self.local_align()
         else:
             self.merge()
-    
+
     def merge(self):
-        if self._cur_task == 0:
-            logging.info(f"[Merging] Save merged backbone checkpoint for task {self._cur_task + 1}")
-            torch.save(
-                self.model.get_backbone_trainable_params(), self.merged_checkpoint(self._cur_task)
-            )
-            return
         if os.path.exists(self.merged_checkpoint(self._cur_task)):
-            logging.info(f"[Merging] Load merged checkpoint for task {self._cur_task + 1}")
+            logging.info(f"[Merging] Load merged checkpoint for task {self._cur_task}")
             backbone_params = torch.load(self.merged_checkpoint(self._cur_task))
             self.load_backbone(backbone_params)
+            return
+
+        if self._cur_task == 0:
+            logging.info(
+                f"[Merging] Save merged backbone checkpoint for task {self._cur_task}"
+            )
+            torch.save(
+                self.model.get_backbone_trainable_params(),
+                self.merged_checkpoint(self._cur_task),
+            )
             return
 
         logging.info(f"[Merging] Method {self._config['train_merge']}")
@@ -235,7 +266,10 @@ class Learner:
             task_params.append(torch.load(self.merged_checkpoint(self._cur_task - 1)))
             task_params.append(torch.load(self.backbone_checkpoint(self._cur_task)))
         else:
-            task_params = [torch.load(self.backbone_checkpoint(task)) for task in range(self._cur_task + 1)]
+            task_params = [
+                torch.load(self.backbone_checkpoint(task))
+                for task in range(self._cur_task + 1)
+            ]
         logging.info(f"[Merging] Loaded {len(task_params)} tasks for merging")
 
         # logging.info("[Merging] Norm layer values BEFORE merging:")
@@ -250,13 +284,18 @@ class Learner:
             topk=self._config["train_merge_topk"],
         )
         self.load_backbone(backbone_params)
-            
+
         # logging.info("[Merging] Norm layer values AFTER merging:")
         # logging.info(f"  norm.weight: mean={self.model.norm.weight.data.mean():.6f}, std={self.model.norm.weight.data.std():.6f}")
         # logging.info(f"  norm.bias: mean={self.model.norm.bias.data.mean():.6f}, std={self.model.norm.bias.data.std():.6f}")
-        
-        logging.info(f"[Merging] Save merged backbone checkpoint for task {self._cur_task + 1}")
-        torch.save(self.model.get_backbone_trainable_params(), self.merged_checkpoint(self._cur_task))
+
+        logging.info(
+            f"[Merging] Save merged backbone checkpoint for task {self._cur_task}"
+        )
+        torch.save(
+            self.model.get_backbone_trainable_params(),
+            self.merged_checkpoint(self._cur_task),
+        )
 
     def local_align(self):
         logging.info(
@@ -302,9 +341,9 @@ class Learner:
 
         self.merge()
 
-        if self._cur_task == 0: 
+        if self._cur_task == 0:
             return
-        
+
         for p in self.model.classifier.parameters():
             p.requires_grad = True
         num_trainable = count_parameters(self.model.classifier, trainable=True)
@@ -317,10 +356,15 @@ class Learner:
 
         robust_weight_base = self._config.get("train_ca_robust_weight", 0.0)
         entropy_weight = self._config.get("train_ca_entropy_weight", 0.0)
-        logit_norm = self._config.get("train_ca_logit_norm", None)  # None means no logit norm
+        logit_norm = self._config.get(
+            "train_ca_logit_norm", None
+        )  # None means no logit norm
 
         optimizer = optim.SGD(
-            self.model.classifier.parameters(), lr=base_lr, weight_decay=5e-4, momentum=0.9
+            self.model.classifier.parameters(),
+            lr=base_lr,
+            weight_decay=5e-4,
+            momentum=0.9,
         )
         scheduler = optim.lr_scheduler.CosineAnnealingLR(
             optimizer=optimizer, T_max=epochs
@@ -357,36 +401,47 @@ class Learner:
                 y = sampled_label[i : i + batch_size]
 
                 logits = self.model.classifier(x)
-                
+
                 if logit_norm is not None:
                     batch_size = logits.size(0)
                     num_tasks = self._cur_task + 1
-                    
+
                     # Compute per-task norms for averaging
-                    task_norms = torch.zeros(batch_size, num_tasks, device=logits.device)
-                    
+                    task_norms = torch.zeros(
+                        batch_size, num_tasks, device=logits.device
+                    )
+
                     for task in range(num_tasks):
-                        cls_indices = [clz for clz in self._cls2task if self._cls2task[clz] == task]
+                        cls_indices = [
+                            clz
+                            for clz in self._cls_to_task_idx
+                            if self._cls_to_task_idx[clz] == task
+                        ]
                         if cls_indices:
-                            task_logits = logits[:, cls_indices]  # (batch_size, num_classes_in_task)
-                            task_norms[:, task] = torch.norm(task_logits, p=2, dim=-1) + 1e-7
-                    
+                            task_logits = logits[
+                                :, cls_indices
+                            ]  # (batch_size, num_classes_in_task)
+                            task_norms[:, task] = (
+                                torch.norm(task_logits, p=2, dim=-1) + 1e-7
+                            )
+
                     # Average norms across all tasks
-                    avg_norms = task_norms.sum(dim=-1) / num_tasks  # Average across all tasks
+                    avg_norms = (
+                        task_norms.sum(dim=-1) / num_tasks
+                    )  # Average across all tasks
                     avg_norms = avg_norms.unsqueeze(-1)  # (batch_size, 1)
-                    
-                    # Apply normalization: logits / avg_norm / logit_norm_factor
+
                     normalized_logits = logits / (avg_norms + 1e-7) / logit_norm
                     loss_vec = F.cross_entropy(normalized_logits, y, reduction="none")
                 else:
                     loss_vec = F.cross_entropy(logits, y, reduction="none")
-                
+
                 if robust_weight_base == 0 and entropy_weight == 0:
                     loss = loss_vec.mean()
                     optimizer.zero_grad()
                     loss.backward()
                     optimizer.step()
-                    
+
                     bs = len(y)
                     total_loss += loss.item() * bs
                     total_ce_loss += loss.item() * bs
@@ -396,27 +451,35 @@ class Learner:
                     total += bs
                 else:
                     L_total = torch.tensor(0.0, device=x.device)  # L = Σ Li
-                    total_term1 = torch.tensor(0.0, device=x.device)  # For logging: sum of all term1
-                    total_term2 = torch.tensor(0.0, device=x.device)  # For logging: sum of all term2
-                    total_term3 = torch.tensor(0.0, device=x.device)  # For logging: sum of all term3 (entropy)
-                    
+                    total_term1 = torch.tensor(
+                        0.0, device=x.device
+                    )  # For logging: sum of all term1
+                    total_term2 = torch.tensor(
+                        0.0, device=x.device
+                    )  # For logging: sum of all term2
+                    total_term3 = torch.tensor(
+                        0.0, device=x.device
+                    )  # For logging: sum of all term3 (entropy)
+
                     unique_classes = torch.unique(y)
-                    class_dist = torch.cdist(x, self._class_means[:self._total_classes].cuda())
+                    class_dist = torch.cdist(
+                        x, self._class_means[: self._total_classes].cuda()
+                    )
                     class_indices = torch.argmin(class_dist, dim=1)
                     for class_i in unique_classes:
-                        label_mask = (y == class_i)
-                        distance_mask = (class_indices == class_i)
+                        label_mask = y == class_i
+                        distance_mask = class_indices == class_i
                         class_mask = distance_mask & label_mask
-                        
+
                         class_samples = torch.where(class_mask)[0]
-                        
+
                         # If no samples meet the conditions, fall back to label-only (term1 only)
                         if len(class_samples) == 0:
                             # Fall back to using only label condition for term1
                             label_only_samples = torch.where(label_mask)[0]
                             if len(label_only_samples) == 0:
                                 continue  # Skip if no samples with this label at all
-                            
+
                             label_losses = loss_vec[label_mask]
                             term1 = label_losses.mean()
                             term2 = torch.tensor(0.0).cuda()
@@ -424,31 +487,43 @@ class Learner:
                         else:
                             class_losses = loss_vec[class_mask]
                             term1 = class_losses.mean()
-                            
+
                             # Second term: E_{x,x'~Ni}[|ℓ(yi, ht+1(x)) - ℓ(yi, ht+1(x'))|] where x,x' ∈ Ai
                             if len(class_samples) >= 2:
                                 pairwise_diffs = torch.abs(
-                                    class_losses.unsqueeze(1) - class_losses.unsqueeze(0)
+                                    class_losses.unsqueeze(1)
+                                    - class_losses.unsqueeze(0)
                                 )
                                 # Remove diagonal (self-comparisons)
-                                mask = ~torch.eye(len(class_losses), dtype=torch.bool, device=x.device)
+                                mask = ~torch.eye(
+                                    len(class_losses), dtype=torch.bool, device=x.device
+                                )
                                 pairwise_diffs = pairwise_diffs[mask]
                                 term2 = pairwise_diffs.mean()
                             else:
                                 term2 = torch.tensor(0.0, device=x.device)
-                            
+
                             # Third term: Cluster entropy minimization
                             if len(class_samples) >= 1 and entropy_weight != 0:
-                                cluster_logits = logits[class_mask]  # Shape: (n_cluster_samples, n_classes)
-                                cluster_probs = F.softmax(cluster_logits, dim=1)  # Shape: (n_cluster_samples, n_classes)
-                                
+                                cluster_logits = logits[
+                                    class_mask
+                                ]  # Shape: (n_cluster_samples, n_classes)
+                                cluster_probs = F.softmax(
+                                    cluster_logits, dim=1
+                                )  # Shape: (n_cluster_samples, n_classes)
+
                                 # Compute entropy for each sample: -Σ p_i * log(p_i)
                                 # Add small epsilon to prevent log(0)
-                                cluster_entropy = -torch.sum(cluster_probs * torch.log(cluster_probs + 1e-8), dim=1)
-                                term3 = cluster_entropy.mean()  # Average entropy across cluster samples
+                                cluster_entropy = -torch.sum(
+                                    cluster_probs * torch.log(cluster_probs + 1e-8),
+                                    dim=1,
+                                )
+                                term3 = (
+                                    cluster_entropy.mean()
+                                )  # Average entropy across cluster samples
                             else:
                                 term3 = torch.tensor(0.0, device=x.device)
-                        
+
                         Li = term1 + robust_weight_base * term2 + entropy_weight * term3
                         L_total += Li
                         total_term1 += term1
@@ -460,13 +535,13 @@ class Learner:
                         loss = L_total / num_classes_in_batch
                     else:
                         loss = loss_vec.mean()  # fallback
-                    
+
                     optimizer.zero_grad()
                     loss.backward()
                     optimizer.step()
-                    
+
                     bs = len(y)
-                    
+
                     # Average the terms by number of classes to get per-sample equivalent
                     if num_classes_in_batch > 0:
                         avg_term1 = total_term1 / num_classes_in_batch
@@ -478,7 +553,7 @@ class Learner:
                         avg_term2 = torch.tensor(0.0, device=x.device)
                         avg_term3 = torch.tensor(0.0, device=x.device)
                         avg_loss = loss_vec.mean()
-                    
+
                     total_loss += avg_loss.item() * bs
                     total_ce_loss += avg_term1.item() * bs
                     total_rb_loss += avg_term2.item() * bs
@@ -537,7 +612,7 @@ class Learner:
             self.model.norm.load_state_dict(norm_params, strict=True)
 
 
-data_table = {
+DATA_TABLE = {
     "cifar224": [(10, 10, 10)],
     "imageneta": [(10, 20, 20)],
     "imagenetr": [(10, 20, 20)],
@@ -546,19 +621,37 @@ data_table = {
     "vtab": [(5, 10, 10)],
 }
 
+BASE_CONFIG = {
+    "seed": 1993,
+    "reset": True,
+    "train_epochs": 10,
+    "train_batch_size": 64,
+    "train_base_lr": 1e-2,
+    "train_weight_decay": 5e-4,
+    "train_merge": "ties",
+    "train_merge_coef": 1.0,
+    "train_merge_topk": 100,
+    "train_merge_incremental": True,
+    "model_backbone": "vit_base_patch16_224_lora",
+    "model_lora_r": 64,
+    "model_lora_alpha": 128,
+    "model_lora_dropout": 0.0,
+    "model_lora_target_modules": ["qkv"],
+    "train_ca": True,
+    "train_ca_samples_per_cls": 512,
+    "train_ca_batch_size": 128,
+    "train_ca_epochs": 10
+}
+
 def run_single_experiment(dataset_name, config_name, experiment_config):
     """Run experiment for a single dataset with specific configuration"""
     
     seed = 1993
     set_random(seed)
     
-    config = {
-        "seed": seed,
-        "reset": True,
-    }
+    config = copy.deepcopy(BASE_CONFIG)
     
-    # Get dataset configuration
-    dataset_num_task, dataset_init_cls, dataset_increment = data_table[dataset_name][0]
+    dataset_num_task, dataset_init_cls, dataset_increment = DATA_TABLE[dataset_name][0]
     dataset_config = {
         "dataset_name": dataset_name,
         "dataset_num_task": dataset_num_task,
@@ -566,22 +659,6 @@ def run_single_experiment(dataset_name, config_name, experiment_config):
         "dataset_increment": dataset_increment,
     }
     config.update(dataset_config)
-    
-    # Base training configuration
-    train_config = {
-        "train_epochs": 10,
-        "train_batch_size": 64,
-        "train_base_lr": 1e-2,
-        "train_weight_decay": 5e-4,
-        
-        "train_merge": "ties",
-        "train_merge_incremental": True,
-        "train_merge_coef": 1.0,
-        "train_merge_topk": 100,
-
-        "train_ca": False
-    }
-    config.update(train_config)
     
     data_manager = DataManager(
         config["dataset_name"],
@@ -591,15 +668,6 @@ def run_single_experiment(dataset_name, config_name, experiment_config):
         config["dataset_increment"],
         False,
     )
-    
-    model_config = {
-        "model_backbone": "vit_base_patch16_224_lora",
-        "model_lora_r": 64,
-        "model_lora_alpha": 128,
-        "model_lora_dropout": 0.0,
-        "model_lora_target_modules": ["qkv"],
-    }
-    config.update(model_config)
 
     config.update(experiment_config)
     
@@ -644,6 +712,7 @@ def run_single_experiment(dataset_name, config_name, experiment_config):
 def run_experiments():
     experiment_configs = {
         "simple_cil": {
+            "train_ca": False,
         },
         "simple_ca": {
             "train_ca": True,
@@ -655,7 +724,7 @@ def run_experiments():
     }
     
     all_results = {}
-    for dataset_name in data_table.keys():
+    for dataset_name in DATA_TABLE.keys():
         print(f"{'='*60}")
         print(f"Starting experiments for dataset: {dataset_name}")
         print(f"{'='*60}")
@@ -675,6 +744,7 @@ def run_experiments():
         )
 
         for config_name, config in experiment_configs.items():
+            logging.info("=" * 80)
             logging.info(f"Starting experiment: {dataset_name} - {config_name}")
             experiment_start_time = time.time()
             result = run_single_experiment(dataset_name, config_name, config)
