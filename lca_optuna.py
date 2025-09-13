@@ -254,8 +254,8 @@ if __name__ == "__main__":
     parser.add_argument(
         "--dataset",
         type=str,
-        default="imagenetr",
-        choices=list(DATA_TABLE.keys()),
+        default="vtab",
+        choices=list(DATA_TABLE.keys()) + ["all"],
         help=f"Dataset to optimize on. Available: {list(DATA_TABLE.keys())}",
     )
     parser.add_argument(
@@ -272,10 +272,20 @@ if __name__ == "__main__":
     )
 
     args = parser.parse_args()
-
-    run_optuna_optimization(
-        dataset_name=args.dataset,
-        n_trials=args.n_trials,
-        early_stop_patience=args.early_stop_patience,
-        max_time_hours=args.max_time_hours,
-    )
+    
+    if args.dataset == "all":
+        for dataset in DATA_TABLE.keys():
+            args.dataset = dataset
+            run_optuna_optimization(
+                dataset_name=args.dataset,
+                n_trials=args.n_trials,
+                early_stop_patience=args.early_stop_patience,
+                max_time_hours=args.max_time_hours,
+            )
+    else:
+        run_optuna_optimization(
+            dataset_name=args.dataset,
+            n_trials=args.n_trials,
+            early_stop_patience=args.early_stop_patience,
+            max_time_hours=args.max_time_hours,
+        )
