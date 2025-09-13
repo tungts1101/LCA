@@ -38,6 +38,7 @@ class Learner:
         self._cur_task = -1
         self._acc_matrix = []
         self._cls_to_task_idx = {}
+        self._acc_history = []
         self.trial = trial
         self.pruning_thresholds = pruning_thresholds
 
@@ -71,6 +72,8 @@ class Learner:
                                 f"[Pruning] ASA {self._asa:.2f} < {threshold:.2f} at task {task + 1}"
                             )
                             raise optuna.TrialPruned()
+
+        logging.info(f"[Evaluation] Final accuracy history: {self._acc_history}")
 
     def before_task(self, task, data_manager):
         task_size = data_manager.get_task_size(task)
@@ -121,6 +124,7 @@ class Learner:
         self._faa = faa
         self._asa = asa
         self._grouped = grouped
+        self._acc_history.append(float(np.round(asa, 2)))
         logging.info(
             f"[Evaluation] FAA: {faa:.2f}, FFM: {ffm:.2f}, FFD: {ffd:.2f}, ASA: {asa:.2f}"
         )
