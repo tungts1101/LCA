@@ -171,7 +171,16 @@ def run_optuna_optimization(
     logging.info(f"Study created: {study_name}")
     logging.info(f"Storage: {storage_name}")
 
-    best_value = -float("inf")
+    # Initialize best_value from existing study if available
+    try:
+        best_value = study.best_value if study.best_value is not None else -float("inf")
+        if best_value != -float("inf"):
+            logging.info(f"Resuming study with existing best value: {best_value:.2f}")
+    except ValueError:
+        # No trials have been completed yet
+        best_value = -float("inf")
+        logging.info("Starting fresh study (no previous trials found)")
+    
     min_delta = 0.01
     no_improvement_trials = 0
 

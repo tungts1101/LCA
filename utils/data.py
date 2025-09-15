@@ -17,7 +17,7 @@ from utils.toolkit import split_images_labels
 DATA_ROOT = "/home/lis/data"
 os.makedirs(DATA_ROOT, exist_ok=True)
 
-def download_and_extract_dataset(dataset_name, file_id, train_subdir="train", test_subdir="test", extract_to_subfolder=True):
+def download_and_extract_dataset(dataset_name, file_id, train_subdir="train", test_subdir="test"):
     train_dir = f"{DATA_ROOT}/{dataset_name}/{train_subdir}/"
     test_dir = f"{DATA_ROOT}/{dataset_name}/{test_subdir}/"
     
@@ -35,14 +35,8 @@ def download_and_extract_dataset(dataset_name, file_id, train_subdir="train", te
             raise Exception(f"Failed to download {dataset_name} dataset: {str(e)}")
         
         print(f"Extracting {dataset_name} dataset...")
-        if extract_to_subfolder:
-            dataset_path = f"{DATA_ROOT}/{dataset_name}"
-            os.makedirs(dataset_path, exist_ok=True)
-            with zipfile.ZipFile(zip_path, 'r') as zip_ref:
-                zip_ref.extractall(dataset_path)
-        else:
-            with zipfile.ZipFile(zip_path, 'r') as zip_ref:
-                zip_ref.extractall(DATA_ROOT)
+        with zipfile.ZipFile(zip_path, 'r') as zip_ref:
+            zip_ref.extractall(DATA_ROOT)
         
         os.remove(zip_path)
         print(f"{dataset_name} dataset extracted successfully.")
