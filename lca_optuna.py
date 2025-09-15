@@ -27,15 +27,15 @@ os.makedirs(LOG_DIR, exist_ok=True)
 OPTUNA_DIR = "optuna"
 os.makedirs(OPTUNA_DIR, exist_ok=True)
 
-# cifar: 98.8, 98.1, 97.71, 97.23, 96.74, 96.28, 95.81, 95.27, 94.8, 94.4
-# in-r: 94.63, 92.46, 91.2, 90.22, 88.88, 87.9, 87.16, 86.58, 86.03, 85.47
-# in-a: 87.43, 86.06, 84.14, 81.79, 80.06, 78.4, 77.07, 75.89, 74.79, 73.72
+# cifar224: 98.8, 98.1, 97.71, 97.23, 96.74, 96.28, 95.81, 95.27, 94.8, 94.4
+# imagenetr: 94.63, 92.46, 91.2, 90.22, 88.88, 87.9, 87.16, 86.58, 86.03, 85.47
+# imageneta: 87.43, 86.06, 84.14, 81.79, 80.06, 78.4, 77.07, 75.89, 74.79, 73.72
 # cub: 98.38, 97.72, 96.47, 95.35, 94.39, 93.37, 92.57, 91.72, 90.94, 90.18
-# omni: 94.5, 93.25, 91.57, 89.34, 87.5, 85.89, 84.52, 83.13, 81.78, 80.5
+# omnibenchmark: 94.5, 93.25, 91.57, 89.34, 87.5, 85.89, 84.52, 83.13, 81.78, 80.5
 # vtab: 99.52, 98.64, 97.06, 95.92, 94.57
 
 EARLY_PRUNING_THRESHOLDS = {
-    "cifar": {1: 98, 3: 97, 5: 96, 7: 95},
+    "cifar224": {1: 98, 3: 97, 5: 96, 7: 95},
     "imagenetr": {1: 92, 3: 90, 5: 87, 7: 86},
     "imageneta": {1: 86, 3: 81, 5: 78, 7: 75},
     "cub": {1: 97, 3: 95, 5: 93, 7: 91},
@@ -56,14 +56,18 @@ def suggest_hyperparameters(trial):
     entropy_weight_log = trial.suggest_float("entropy_weight_log", -2, 2)
     entropy_weight = 10**entropy_weight_log
 
+    ca_logit_norm = trial.suggest_float("train_ca_logit_norm", 0.1, 1.0)
+
     ca_lr = round(ca_lr, 5)
     robust_weight = round(robust_weight, 5)
     entropy_weight = round(entropy_weight, 5)
+    ca_logit_norm = round(ca_logit_norm, 2)
 
     return {
         "train_ca_lr": ca_lr,
         "train_ca_rb_weight": robust_weight,
         "train_ca_entropy_weight": entropy_weight,
+        "train_ca_logit_norm": ca_logit_norm,
     }
 
 
@@ -136,7 +140,6 @@ def run_optuna_optimization(
         force=True,
     )
 
-    optimization_start_time = time.time()
     logging.info("=" * 80)
     logging.info(
         f"Starting Optuna optimization with {n_trials} trials for {dataset_name}"
@@ -179,7 +182,7 @@ def run_optuna_optimization(
                 best_value = trial.value
                 no_improvement_trials = 0
                 logging.info(
-                    f"New best value: {best_value:.2f} at trial {trial.number}"
+                    f"New value: {best_value:.2f} at trial {trial.number}"
                 )
             else:
                 no_improvement_trials += 1
@@ -195,22 +198,11 @@ def run_optuna_optimization(
                     )
                     study.stop()
 
-        if max_time_hours is not None:
-            elapsed_time = time.time() - optimization_start_time
-            elapsed_hours = elapsed_time / 3600
-            if elapsed_hours >= max_time_hours:
-                logging.info(
-                    f"Early stopping: Time limit reached! Elapsed: {elapsed_hours:.2f}/{max_time_hours} hours"
-                )
-                study.stop()
-                return
-
     config = copy.deepcopy(BASE_CONFIG)
     config["train_ca"] = True
     config["train_ca_samples_per_cls"] = 512
     config["train_ca_batch_size"] = 128
     config["train_ca_epochs"] = 10
-    config["train_ca_logit_norm"] = 0.1  # None means no logit norm]
 
     if dataset_name not in DATA_TABLE:
         raise ValueError(
@@ -244,6 +236,7 @@ def run_optuna_optimization(
             lambda trial: objective(data_manager, trial, config),
             n_trials=n_trials,
             callbacks=callbacks,
+            timeout=max_time_hours * 3600 if max_time_hours else None
         )
     except KeyboardInterrupt:
         logging.info("Optimization interrupted by user")

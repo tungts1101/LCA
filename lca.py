@@ -69,7 +69,7 @@ class Learner:
                         threshold = thresholds[task]
                         if self._asa < threshold:
                             logging.info(
-                                f"[Pruning] ASA {self._asa:.2f} < {threshold:.2f} at task {task + 1}"
+                                f"[Pruning] ASA {self._asa:.2f} < {threshold:.2f} at task {task}"
                             )
                             raise optuna.TrialPruned()
 
@@ -618,8 +618,8 @@ class Learner:
 
 DATA_TABLE = {
     "cifar224": [(10, 10, 10)],
-    "imageneta": [(10, 20, 20)],
     "imagenetr": [(10, 20, 20)],
+    "imageneta": [(10, 20, 20)],
     "cub": [(10, 20, 20)],
     "omnibenchmark": [(10, 30, 30)],
     "vtab": [(5, 10, 10)],
