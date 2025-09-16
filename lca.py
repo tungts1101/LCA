@@ -287,11 +287,17 @@ class Learner:
                 torch.load(self.classifier_checkpoint(self._cur_task)), strict=True
             )
         
+        if "nme" in self._config.get("model_classifier", ["mlp"]):
+            self.update_nme_classifier()
+
         if self._config.get("train_ca", False):
             self.local_align()
         else:
             if "nme" in self._config.get("model_classifier", ["mlp"]):
                 self.compute_multivariate_normal()
+                for clz in range(self._known_classes, self._total_classes):
+                    self.nme_classifier.weight.data[clz, :] = self._class_means[clz, :].cuda()
+
             self.merge()
 
     def merge(self):
@@ -353,10 +359,6 @@ class Learner:
         )
 
     def compute_multivariate_normal(self):
-        classifiers = self._config.get("model_classifier", ["mlp"])
-        if "nme" in classifiers:
-            self.update_nme_classifier()
-
         logging.info(
             f"[Alignment] Compute class mean and cov for classes {self._known_classes} - {self._total_classes - 1}"
         )
@@ -397,9 +399,6 @@ class Learner:
 
             self._class_means[cls_idx, :] = class_mean
             self._class_covs[cls_idx, ...] = class_cov
-
-            if "nme" in classifiers:
-                self.nme_classifier.weight.data[cls_idx, :] = class_mean
 
     def align(self, classifier):
         # Sample data from Gaussian distributions
@@ -635,6 +634,10 @@ class Learner:
 
     def local_align(self):
         self.compute_multivariate_normal()
+
+        if "nme" in self._config.get("model_classifier", ["mlp"]):
+            for clz in range(self._known_classes, self._total_classes):
+                self.nme_classifier.weight.data[clz, :] = self._class_means[clz, :].cuda()
         
         self.merge()
         
