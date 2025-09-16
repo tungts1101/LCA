@@ -402,6 +402,7 @@ class Learner:
 
     def align(self, classifier):
         # Sample data from Gaussian distributions
+        samples_per_cls = self._config.get("train_ca_samples_per_cls", 256)
         sampled_data, sampled_label = [], []
         for cls_idx in range(self._total_classes):
             cls_mean = self._class_means[cls_idx].cuda()
@@ -419,7 +420,6 @@ class Learner:
 
         # Create optimizer
         epochs = self._config.get("train_ca_epochs", 10)
-        samples_per_cls = self._config.get("train_ca_samples_per_cls", 256)
         batch_size = self._config.get("train_ca_batch_size", 64)
         base_lr = self._config.get("train_ca_lr", 1e-2)
 
