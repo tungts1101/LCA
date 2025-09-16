@@ -132,10 +132,10 @@ class Learner:
 
         logging.info(f"[Evaluation] Task {self._cur_task}")
         num_tasks = self._cur_task + 1
+        y_true = np.concatenate(y_true)
 
         if y_pred_mlp:
             y_pred_mlp = np.concatenate(y_pred_mlp)
-            y_true = np.concatenate(y_true)
             acc_total_mlp, grouped_mlp = accuracy(y_pred_mlp.T, y_true, self._class_increments)
             grouped_mlp = [float(acc) for acc in grouped_mlp]
             self._mlp_matrix.append(grouped_mlp)
