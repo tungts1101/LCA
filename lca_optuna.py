@@ -49,14 +49,14 @@ def suggest_hyperparameters(trial):
     ca_lr = trial.suggest_float("train_ca_lr", 1e-4, 1e-2)
 
     # robust_weight_log = trial.suggest_categorical("robust_weight_log", [-3, -2, -1, 0, 1, 2, 3])
-    robust_weight_log = trial.suggest_float("robust_weight_log", -3, 3)
+    robust_weight_log = trial.suggest_float("robust_weight_log", -2, 1)
     robust_weight = 10**robust_weight_log
 
     # entropy_weight_log = trial.suggest_categorical("entropy_weight_log", [-2, -1, 0, 1, 2])
-    entropy_weight_log = trial.suggest_float("entropy_weight_log", -2, 2)
+    entropy_weight_log = trial.suggest_float("entropy_weight_log", -2, 1)
     entropy_weight = 10**entropy_weight_log
 
-    ca_logit_norm = trial.suggest_float("train_ca_logit_norm", 0.1, 1.0)
+    ca_logit_norm = trial.suggest_float("train_ca_logit_norm", 0.1, 0.5)
 
     ca_lr = round(ca_lr, 5)
     robust_weight = round(robust_weight, 5)
@@ -186,7 +186,7 @@ def run_optuna_optimization(
     def early_stopping_callback(study, trial):
         nonlocal best_value, no_improvement_trials, min_delta
         if trial is not None:
-            if trial.value is not None and trial.value - min_delta > best_value and trial.state == optuna.trial.TrialState.COMPLETE:
+            if trial.state == optuna.trial.TrialState.COMPLETE and trial.value is not None and trial.value - min_delta > best_value:
                 best_value = trial.value
                 no_improvement_trials = 0
                 logging.info(
