@@ -53,7 +53,7 @@ class Learner:
         self.nme_classifier = None
     
     def update_nme_classifier(self):
-        classifier = CosineLinear(self.model.feature_dim, self._total_classnum)
+        classifier = CosineLinear(self.model.feature_dim, self._total_classes)
         if self.nme_classifier is not None:
             nb_output = self.nme_classifier.out_features
             weight = copy.deepcopy(self.nme_classifier.weight.data)
@@ -792,10 +792,10 @@ def run_experiments():
         #     "train_ca_samples_per_cls": 512,
         #     "train_ca_batch_size": 128,
         # },
-        "simple_nme": {
-            "train_ca": False,
-            "model_classifier": ["nme"],
-        },
+        # "simple_nme": {
+        #     "train_ca": False,
+        #     "model_classifier": ["nme"],
+        # },
         "nme_lca": {
             "train_ca": True,
             "model_classifier": ["nme"],
