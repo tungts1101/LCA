@@ -10,6 +10,7 @@ import gc
 import time
 from helper import (
     Model,
+    CosineLinear,
     compute_metrics,
     accuracy,
     set_random,
@@ -36,8 +37,10 @@ class Learner:
         self._total_classes = 0
         self._class_increments = []
         self._cur_task = -1
-        self._acc_matrix = []
+        self._mlp_matrix = []
+        self._nme_matrix = []
         self._cls_to_task_idx = {}
+        self._acc = 0.0
         self._acc_history = []
         self.trial = trial
         self.pruning_thresholds = pruning_thresholds
@@ -47,6 +50,17 @@ class Learner:
         torch.save(
             self.model.get_backbone_trainable_params(), self.backbone_checkpoint()
         )
+        self.nme_classifier = None
+    
+    def update_nme_classifier(self):
+        classifier = CosineLinear(self.model.feature_dim, self._total_classnum)
+        if self.nme_classifier is not None:
+            nb_output = self.nme_classifier.out_features
+            weight = copy.deepcopy(self.nme_classifier.weight.data)
+            classifier.weight.data[:nb_output] = weight
+
+        del self.nme_classifier
+        self.nme_classifier = classifier
 
     def learn(self, data_manager):
         self.data_manager = data_manager
@@ -67,9 +81,9 @@ class Learner:
                     thresholds = self.pruning_thresholds[dataset_name]
                     if task in thresholds:
                         threshold = thresholds[task]
-                        if self._asa < threshold:
+                        if self._acc < threshold:
                             logging.info(
-                                f"[Pruning] ASA {self._asa:.2f} < {threshold:.2f} at task {task}"
+                                f"[Pruning] Acc {self._acc:.2f} < {threshold:.2f} at task {task}"
                             )
                             raise optuna.TrialPruned()
 
@@ -94,40 +108,74 @@ class Learner:
         test_loader = DataLoader(test_set, batch_size=256, shuffle=False, num_workers=4)
 
         self.model.eval()
-
-        y_true, y_pred = [], []
+        
+        y_true, y_pred_mlp, y_pred_nme = [], [], []
+        classifiers = self._config.get("model_classifier", ["mlp"])
+        
         with torch.no_grad():
             for _, (_, _, x, y) in enumerate(test_loader):
                 x, y = x.cuda(), y.cuda()
-                logits = self.model(x)
-                predicts = logits.argmax(dim=1)
-                y_pred.append(predicts.cpu().numpy())
+                
+                if "mlp" in classifiers:
+                    logits = self.model(x)
+                    predicts_mlp = logits.argmax(dim=1)
+                    y_pred_mlp.append(predicts_mlp.cpu().numpy())
+                
+                if "nme" in classifiers:
+                    z = self.model.get_features(x)
+                    logits = self.nme_classifier(z)
+                    predicts_nme = logits.argmax(dim=1)
+                    y_pred_nme.append(predicts_nme.cpu().numpy())
+                
                 y_true.append(y.cpu().numpy())
 
-        y_pred = np.concatenate(y_pred)
-        y_true = np.concatenate(y_true)
-        acc_total, grouped = accuracy(y_pred.T, y_true, self._class_increments)
-        grouped = [float(acc) for acc in grouped]
-
         logging.info(f"[Evaluation] Task {self._cur_task}")
-        logging.info(f"[Evaluation] Total Acc: {acc_total:.2f}, Grouped Acc: {grouped}")
+        num_tasks = self._cur_task + 1
 
-        self._acc_matrix.append(grouped)
+        if y_pred_mlp:
+            y_pred_mlp = np.concatenate(y_pred_mlp)
+            y_true = np.concatenate(y_true)
+            acc_total_mlp, grouped_mlp = accuracy(y_pred_mlp.T, y_true, self._class_increments)
+            grouped_mlp = [float(acc) for acc in grouped_mlp]
+            self._mlp_matrix.append(grouped_mlp)
+            logging.info(f"[Evaluation MLP] Total Acc: {acc_total_mlp:.2f}, Grouped Acc: {grouped_mlp}")
 
-        num_tasks = len(self._acc_matrix)
-        accuracy_matrix = np.zeros((num_tasks, num_tasks))
-        for i in range(num_tasks):
-            for j in range(i + 1):
-                accuracy_matrix[i, j] = self._acc_matrix[i][j]
+            mlp_accuracy_matrix = np.zeros((num_tasks, num_tasks))
+            for i in range(num_tasks):
+                for j in range(i + 1):
+                    mlp_accuracy_matrix[i, j] = self._mlp_matrix[i][j]
+            faa_mlp, ffm_mlp, ffd_mlp, asa_mlp = compute_metrics(mlp_accuracy_matrix)
+            logging.info(
+                f"[Evaluation MLP] FAA: {faa_mlp:.2f}, FFM: {ffm_mlp:.2f}, FFD: {ffd_mlp:.2f}, ASA: {asa_mlp:.2f}"
+            )
+        else:
+            faa_mlp = asa_mlp = 0.0
 
-        faa, ffm, ffd, asa = compute_metrics(accuracy_matrix)
-        self._faa = faa
-        self._asa = asa
-        self._grouped = grouped
-        self._acc_history.append(float(np.round(asa, 2)))
-        logging.info(
-            f"[Evaluation] FAA: {faa:.2f}, FFM: {ffm:.2f}, FFD: {ffd:.2f}, ASA: {asa:.2f}"
-        )
+        if y_pred_nme:
+            y_pred_nme = np.concatenate(y_pred_nme)
+            acc_total_nme, grouped_nme = accuracy(y_pred_nme.T, y_true, self._class_increments)
+            grouped_nme = [float(acc) for acc in grouped_nme]
+            self._nme_matrix.append(grouped_nme)
+            logging.info(f"[Evaluation NME] Total Acc: {acc_total_nme:.2f}, Grouped Acc: {grouped_nme}")
+
+            nme_accuracy_matrix = np.zeros((num_tasks, num_tasks))
+            for i in range(num_tasks):
+                for j in range(i + 1):
+                    nme_accuracy_matrix[i, j] = self._nme_matrix[i][j]
+            faa_nme, ffm_nme, ffd_nme, asa_nme = compute_metrics(nme_accuracy_matrix)
+            logging.info(
+                f"[Evaluation NME] FAA: {faa_nme:.2f}, FFM: {ffm_nme:.2f}, FFD: {ffd_nme:.2f}, ASA: {asa_nme:.2f}"
+            )
+        else:
+            faa_nme = asa_nme = 0.0
+
+        self._faa_mlp = faa_mlp
+        self._asa_mlp = asa_mlp
+        self._faa_nme = faa_nme
+        self._asa_nme = asa_nme
+        
+        self._acc = max(asa_mlp, asa_nme)
+        self._acc_history.append(float(np.round(self._acc, 2)))
 
     def train(self):
         self.model.update_classifier(
@@ -237,10 +285,12 @@ class Learner:
             self.model.classifier.heads[self._cur_task].load_state_dict(
                 torch.load(self.classifier_checkpoint(self._cur_task)), strict=True
             )
-
+        
         if self._config.get("train_ca", False):
             self.local_align()
         else:
+            if "nme" in self._config.get("model_classifier", ["mlp"]):
+                self.compute_multivariate_normal()
             self.merge()
 
     def merge(self):
@@ -301,7 +351,11 @@ class Learner:
             self.merged_checkpoint(self._cur_task),
         )
 
-    def local_align(self):
+    def compute_multivariate_normal(self):
+        classifiers = self._config.get("model_classifier", ["mlp"])
+        if "nme" in classifiers:
+            self.update_nme_classifier()
+
         logging.info(
             f"[Alignment] Compute class mean and cov for classes {self._known_classes} - {self._total_classes - 1}"
         )
@@ -343,40 +397,13 @@ class Learner:
             self._class_means[cls_idx, :] = class_mean
             self._class_covs[cls_idx, ...] = class_cov
 
-        self.merge()
+            if "nme" in classifiers:
+                self.nme_classifier.weight.data[cls_idx, :] = class_mean
 
-        if self._cur_task == 0:
-            return
-
-        for p in self.model.classifier.parameters():
-            p.requires_grad = True
-        num_trainable = count_parameters(self.model.classifier, trainable=True)
-        logging.info(f"[Alignment] Num trainable parameters: {num_trainable:,}")
-
-        epochs = self._config.get("train_ca_epochs", 10)
-        samples_per_cls = self._config.get("train_ca_samples_per_cls", 256)
-        batch_size = self._config.get("train_ca_batch_size", 64)
-        base_lr = self._config.get("train_ca_lr", 1e-2)
-
-        robust_weight_base = self._config.get("train_ca_robust_weight", 0.0)
-        entropy_weight = self._config.get("train_ca_entropy_weight", 0.0)
-        logit_norm = self._config.get(
-            "train_ca_logit_norm", None
-        )  # None means no logit norm
-
-        optimizer = optim.SGD(
-            self.model.classifier.parameters(),
-            lr=base_lr,
-            weight_decay=5e-4,
-            momentum=0.9,
-        )
-        scheduler = optim.lr_scheduler.CosineAnnealingLR(
-            optimizer=optimizer, T_max=epochs
-        )
-
+    def align(self, classifier):
         # Sample data from Gaussian distributions
         sampled_data, sampled_label = [], []
-        for cls_idx in range(total_class):
+        for cls_idx in range(self._total_classes):
             cls_mean = self._class_means[cls_idx].cuda()
             cls_cov = self._class_covs[cls_idx].cuda()
 
@@ -389,6 +416,34 @@ class Learner:
 
         sampled_data = torch.cat(sampled_data, dim=0).float().cuda()
         sampled_label = torch.tensor(sampled_label).long().cuda()
+
+        # Create optimizer
+        epochs = self._config.get("train_ca_epochs", 10)
+        samples_per_cls = self._config.get("train_ca_samples_per_cls", 256)
+        batch_size = self._config.get("train_ca_batch_size", 64)
+        base_lr = self._config.get("train_ca_lr", 1e-2)
+
+        robust_weight_base = self._config.get("train_ca_robust_weight", 0.0)
+        entropy_weight = self._config.get("train_ca_entropy_weight", 0.0)
+        logit_norm = self._config.get(
+            "train_ca_logit_norm", None
+        )  # None means no logit norm
+
+        for p in classifier.parameters():
+            p.requires_grad = True
+            
+        num_trainable = count_parameters(classifier, trainable=True)
+        logging.info(f"[Alignment] Num trainable parameters: {num_trainable:,}")
+
+        optimizer = optim.SGD(
+            classifier.parameters(),
+            lr=base_lr,
+            weight_decay=5e-4,
+            momentum=0.9,
+        )
+        scheduler = optim.lr_scheduler.CosineAnnealingLR(
+            optimizer=optimizer, T_max=epochs
+        )
 
         # Training loop with LCA loss implementation
         for epoch in range(epochs):
@@ -404,7 +459,7 @@ class Learner:
                 x = sampled_data[i : i + batch_size]
                 y = sampled_label[i : i + batch_size]
 
-                logits = self.model.classifier(x)
+                logits = classifier(x)
 
                 if logit_norm is not None:
                     batch_size = logits.size(0)
@@ -577,6 +632,22 @@ class Learner:
                     f"Accuracy: {total_acc/total:.4f}"
                 )
 
+    def local_align(self):
+        self.compute_multivariate_normal()
+        
+        self.merge()
+        
+        if self._cur_task == 0:
+            return
+        
+        for classifier_name in self._config.get("model_classifier", ["mlp"]):
+            if classifier_name == "mlp":
+                logging.info(f"[Alignment] Aligning MLP classifier")
+                self.align(self.model.classifier)
+            elif classifier_name == "nme":
+                logging.info(f"[Alignment] Aligning NME classifier")
+                self.align(self.nme_classifier)
+
     def prefix(self):
         prefix_parts = [
             str(self._config["seed"]),
@@ -617,11 +688,11 @@ class Learner:
 
 
 DATA_TABLE = {
-    "cifar224": [(10, 10, 10)],
-    "imagenetr": [(10, 20, 20)],
-    "imageneta": [(10, 20, 20)],
-    "cub": [(10, 20, 20)],
-    "omnibenchmark": [(10, 30, 30)],
+    # "cifar224": [(10, 10, 10)],
+    # "imagenetr": [(10, 20, 20)],
+    # "imageneta": [(10, 20, 20)],
+    # "cub": [(10, 20, 20)],
+    # "omnibenchmark": [(10, 30, 30)],
     "vtab": [(5, 10, 10)],
 }
 
@@ -641,19 +712,17 @@ BASE_CONFIG = {
     "model_lora_alpha": 128,
     "model_lora_dropout": 0.0,
     "model_lora_target_modules": ["qkv"],
+    "model_classifier": ["mlp"],
     "train_ca": True,
     "train_ca_samples_per_cls": 512,
     "train_ca_batch_size": 128,
-    "train_ca_epochs": 10
+    "train_ca_epochs": 10,
 }
 
 def run_single_experiment(dataset_name, config_name, experiment_config):
-    """Run experiment for a single dataset with specific configuration"""
-    
-    seed = 1993
-    set_random(seed)
-    
     config = copy.deepcopy(BASE_CONFIG)
+
+    set_random(config["seed"])
     
     dataset_num_task, dataset_init_cls, dataset_increment = DATA_TABLE[dataset_name][0]
     dataset_config = {
@@ -682,20 +751,22 @@ def run_single_experiment(dataset_name, config_name, experiment_config):
 
         learner = Learner(config)
         learner.learn(data_manager)
-        mlp_faa = learner._faa
-        mlp_asa = learner._asa
-        result = {
-            "MLP_FAA": mlp_faa,
-            "MLP_ASA": mlp_asa,
-            "config": experiment_config
-        }
+        
+        mlp_faa = learner._faa_mlp
+        mlp_asa = learner._asa_mlp
+        nme_faa = learner._faa_nme
+        nme_asa = learner._asa_nme
+        
         logging.info(f"[Experiment {experiment_name}]")
         logging.info(f"  Configuration: {experiment_config}")
-        logging.info(f"  MLP - FAA: {mlp_faa:.2f}, ASA: {mlp_asa:.2f}")
+        classifiers = config.get("model_classifier", ["mlp"])
+        if "mlp" in classifiers:
+            logging.info(f"  MLP - FAA: {mlp_faa:.2f}, ASA: {mlp_asa:.2f}")
+        if "nme" in classifiers:
+            logging.info(f"  NME - FAA: {nme_faa:.2f}, ASA: {nme_asa:.2f}")
         del learner
         torch.cuda.empty_cache()
         gc.collect()
-        return result
     except Exception as e:
         import traceback
         error_details = traceback.format_exc()
@@ -703,38 +774,43 @@ def run_single_experiment(dataset_name, config_name, experiment_config):
         logging.error(f"Exception Type: {type(e).__name__}")
         logging.error(f"Exception Message: {str(e)}")
         logging.error(f"Full Traceback:\n{error_details}")
-        return {
-            "MLP_FAA": 0.0,
-            "MLP_ASA": 0.0,
-            "error": str(e),
-            "error_type": type(e).__name__,
-            "traceback": error_details,
-            "config": experiment_config
-        }
 
 
 def run_experiments():
     experiment_configs = {
-        "simple_cil": {
+        # "simple_cil": {
+        #     "train_ca": False,
+        # },
+        # "simple_ca": {
+        #     "train_ca": True,
+        #     "train_ca_epochs": 10,
+        #     "train_ca_lr": 1e-2,
+        #     "train_ca_samples_per_cls": 512,
+        #     "train_ca_batch_size": 128,
+        # },
+        "simple_nme": {
             "train_ca": False,
+            "model_classifier": ["nme"],
         },
-        "simple_ca": {
+        "nme_lca": {
             "train_ca": True,
+            "model_classifier": ["nme"],
             "train_ca_epochs": 10,
-            "train_ca_lr": 1e-2,
+            "train_ca_lr": 1e-3,
             "train_ca_samples_per_cls": 512,
             "train_ca_batch_size": 128,
+            "train_ca_robust_weight": 0.1,
+            "train_ca_entropy_weight": 0.1,
+            "train_ca_logit_norm": 0.1,
         }
     }
     
-    all_results = {}
     for dataset_name in DATA_TABLE.keys():
         print(f"{'='*60}")
         print(f"Starting experiments for dataset: {dataset_name}")
         print(f"{'='*60}")
-        dataset_results = {}
 
-        logfilename = os.path.join(LOG_DIR, f"base_{dataset_name}.log")
+        logfilename = os.path.join(LOG_DIR, f"nme_{dataset_name}.log")
         for handler in logging.root.handlers[:]:
             logging.root.removeHandler(handler)
         logging.basicConfig(
@@ -751,11 +827,9 @@ def run_experiments():
             logging.info("=" * 80)
             logging.info(f"Starting experiment: {dataset_name} - {config_name}")
             experiment_start_time = time.time()
-            result = run_single_experiment(dataset_name, config_name, config)
+            run_single_experiment(dataset_name, config_name, config)
             experiment_end_time = time.time()
             logging.info(f"Experiment {dataset_name}_{config_name} time: {experiment_end_time - experiment_start_time:.2f} seconds")
-            dataset_results[config_name] = result
-        all_results[dataset_name] = dataset_results
 
 if __name__ == "__main__":
     start_time = time.time()

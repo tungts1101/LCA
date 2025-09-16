@@ -1,11 +1,13 @@
 import torch
 from torch import nn
+import torch.nn.functional as F
 import timm
 from timm.models.layers.weight_init import trunc_normal_
 from peft import get_peft_model, LoraConfig
 import numpy as np
 import logging
 import random
+import math
 
 
 # Helper functions ============================================================
@@ -213,6 +215,24 @@ class ContinualLinear(nn.Module):
         return torch.cat(out, dim=1)
 
 
+class CosineLinear(nn.Module):
+    def __init__(self, in_features, out_features):
+        super(CosineLinear, self).__init__()
+        self.in_features = in_features
+        self.out_features = out_features
+        self.weight = nn.Parameter(torch.Tensor(out_features, in_features))
+        self.reset_parameters()
+
+    def reset_parameters(self):
+        stdv = 1. / math.sqrt(self.weight.size(1))
+        self.weight.data.uniform_(-stdv, stdv)
+
+    def forward(self, x, return_dict=False):
+        out = F.linear(F.normalize(x, p=2, dim=1), F.normalize(self.weight, p=2, dim=1))
+
+        if return_dict:
+            return {'logits': out}
+        return out
 # =============================================================================
 
 

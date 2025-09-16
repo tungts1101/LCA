@@ -86,20 +86,20 @@ def objective(data_manager, trial, config):
         )
         learner.learn(data_manager)
 
-        asa_score = learner._asa
+        acc = learner._acc
 
         trial_end_time = time.time()
         trial_duration = trial_end_time - trial_start_time
 
         logging.info(
-            f"[Trial {trial.number}] ASA Score: {asa_score:.2f}, Duration: {trial_duration:.2f}s"
+            f"[Trial {trial.number}] Accuracy: {acc:.2f}, Duration: {trial_duration:.2f}s"
         )
 
         del learner
         torch.cuda.empty_cache()
         gc.collect()
 
-        return asa_score
+        return acc
 
     except optuna.TrialPruned:
         trial_end_time = time.time()
