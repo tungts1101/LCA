@@ -171,7 +171,6 @@ def run_optuna_optimization(
     logging.info(f"Study created: {study_name}")
     logging.info(f"Storage: {storage_name}")
 
-    # Initialize best_value from existing study if available
     try:
         best_value = study.best_value if study.best_value is not None else -float("inf")
         if best_value != -float("inf"):
@@ -186,8 +185,8 @@ def run_optuna_optimization(
 
     def early_stopping_callback(study, trial):
         nonlocal best_value, no_improvement_trials, min_delta
-        if trial is not None and trial.state == optuna.trial.TrialState.COMPLETE:
-            if trial.value is not None and trial.value - min_delta > best_value:
+        if trial is not None:
+            if trial.value is not None and trial.value - min_delta > best_value and trial.state == optuna.trial.TrialState.COMPLETE:
                 best_value = trial.value
                 no_improvement_trials = 0
                 logging.info(
