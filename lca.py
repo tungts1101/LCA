@@ -61,6 +61,7 @@ class Learner:
 
         del self.nme_classifier
         self.nme_classifier = classifier
+        self.nme_classifier.cuda()
 
     def learn(self, data_manager):
         self.data_manager = data_manager
