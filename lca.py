@@ -31,7 +31,7 @@ LOG_DIR = "logs"
 os.makedirs(LOG_DIR, exist_ok=True)
 
 class Learner:
-    def __init__(self, config, trial=None, pruning_thresholds={}):
+    def __init__(self, config, study=None, trial=None, pruning_thresholds={}):
         self._config = config
         self._known_classes = 0
         self._total_classes = 0
@@ -42,6 +42,7 @@ class Learner:
         self._cls_to_task_idx = {}
         self._acc = 0.0
         self._acc_history = []
+        self.study = study
         self.trial = trial
         self.pruning_thresholds = pruning_thresholds
 
@@ -87,6 +88,15 @@ class Learner:
                                 f"[Pruning] Acc {self._acc:.2f} < {threshold:.2f} at task {task}"
                             )
                             raise optuna.TrialPruned()
+            
+            if self.study is not None and self.trial is not None:
+                if self.study.best_value is not None:
+                    if self._acc < self.study.best_value:
+                        logging.info(
+                            f"[Pruning] Acc {self._acc:.2f} < best value {self.study.best_value:.2f} at task {task}"
+                        )
+                        raise optuna.TrialPruned()
+                
 
         logging.info(f"[Evaluation] Final accuracy history: {self._acc_history}")
 

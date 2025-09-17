@@ -71,7 +71,7 @@ def suggest_hyperparameters(trial):
     }
 
 
-def objective(data_manager, trial, config):
+def objective(data_manager, study, trial, config):
     trial_start_time = time.time()
     try:
         hyperparams = suggest_hyperparameters(trial)
@@ -82,7 +82,7 @@ def objective(data_manager, trial, config):
         )
 
         learner = Learner(
-            config, trial=trial, pruning_thresholds=EARLY_PRUNING_THRESHOLDS.copy()
+            config, study=study, trial=trial, pruning_thresholds=EARLY_PRUNING_THRESHOLDS.copy()
         )
         learner.learn(data_manager)
 
@@ -180,13 +180,13 @@ def run_optuna_optimization(
         best_value = -float("inf")
         logging.info("Starting fresh study (no previous trials found)")
     
-    min_delta = 0.01
+    min_delta = 0.00
     no_improvement_trials = 0
 
     def early_stopping_callback(study, trial):
         nonlocal best_value, no_improvement_trials, min_delta
-        if trial is not None:
-            if trial.state == optuna.trial.TrialState.COMPLETE and trial.value is not None and trial.value - min_delta > best_value:
+        if trial is not None and trial.state == optuna.trial.TrialState.COMPLETE:
+            if  trial.value is not None and trial.value - min_delta > best_value:
                 best_value = trial.value
                 no_improvement_trials = 0
                 logging.info(
@@ -241,7 +241,7 @@ def run_optuna_optimization(
     try:
         callbacks = [early_stopping_callback]
         study.optimize(
-            lambda trial: objective(data_manager, trial, config),
+            lambda trial: objective(data_manager, study, trial, config),
             n_trials=n_trials,
             callbacks=callbacks,
             timeout=max_time_hours * 3600 if max_time_hours else None
