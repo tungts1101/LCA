@@ -692,11 +692,11 @@ class Learner:
 
 
 DATA_TABLE = {
-    # "cifar224": [(10, 10, 10)],
-    # "imagenetr": [(10, 20, 20)],
-    # "imageneta": [(10, 20, 20)],
-    # "cub": [(10, 20, 20)],
-    # "omnibenchmark": [(10, 30, 30)],
+    "cifar224": [(10, 10, 10)],
+    "imagenetr": [(10, 20, 20)],
+    "imageneta": [(10, 20, 20)],
+    "cub": [(10, 20, 20)],
+    "omnibenchmark": [(10, 30, 30)],
     "vtab": [(5, 10, 10)],
 }
 
