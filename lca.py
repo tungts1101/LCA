@@ -89,13 +89,16 @@ class Learner:
                             )
                             raise optuna.TrialPruned()
             
-            if self.study is not None and self.trial is not None:
-                if self.study.best_value is not None:
-                    if self._acc < self.study.best_value:
-                        logging.info(
-                            f"[Pruning] Acc {self._acc:.2f} < best value {self.study.best_value:.2f} at task {task}"
-                        )
-                        raise optuna.TrialPruned()
+            try:
+                best_value = self.study.best_value
+            except Exception:
+                best_value = None
+            if best_value is not None:
+                if self._acc < best_value:
+                    logging.info(
+                        f"[Pruning] Acc {self._acc:.2f} < best value {best_value:.2f} at task {task}"
+                    )
+                    raise optuna.TrialPruned()
                 
 
         logging.info(f"[Evaluation] Final accuracy history: {self._acc_history}")
@@ -702,12 +705,13 @@ class Learner:
 
 
 DATA_TABLE = {
-    "cifar224": [(10, 10, 10)],
-    "imagenetr": [(10, 20, 20)],
-    "imageneta": [(10, 20, 20)],
-    "cub": [(10, 20, 20)],
-    "omnibenchmark": [(10, 30, 30)],
-    "vtab": [(5, 10, 10)],
+    # "cifar224": [(10, 10, 10)],
+    # "imagenetr": [(10, 20, 20)],
+    # "imageneta": [(10, 20, 20)],
+    # "cub": [(10, 20, 20)],
+    # "omnibenchmark": [(10, 30, 30)],
+    # "vtab": [(5, 10, 10)],
+    "cars": [(10, 16, 20)]
 }
 
 BASE_CONFIG = {
@@ -792,31 +796,37 @@ def run_single_experiment(dataset_name, config_name, experiment_config):
 
 def run_experiments():
     experiment_configs = {
-        # "simple_cil": {
-        #     "train_ca": False,
-        # },
-        # "simple_ca": {
-        #     "train_ca": True,
-        #     "train_ca_epochs": 10,
-        #     "train_ca_lr": 1e-2,
-        #     "train_ca_samples_per_cls": 512,
-        #     "train_ca_batch_size": 128,
-        # },
-        # "simple_nme": {
-        #     "train_ca": False,
-        #     "model_classifier": ["nme"],
-        # },
+        "simple_cil": {
+            "train_ca": False,
+        },
+        "simple_ca": {
+            "train_ca": True,
+            "train_ca_epochs": 10,
+            "train_ca_lr": 1e-2,
+            "train_ca_samples_per_cls": 512,
+            "train_ca_batch_size": 128,
+        },
+        "simple_nme": {
+            "train_ca": False,
+            "model_classifier": ["nme"],
+        },
         "nme_lca": {
             "train_ca": True,
             "model_classifier": ["nme"],
             "train_ca_epochs": 10,
-            "train_ca_lr": 1e-3,
+            "train_ca_lr": 1e-2,
             "train_ca_samples_per_cls": 512,
             "train_ca_batch_size": 128,
-            "train_ca_robust_weight": 0.1,
-            "train_ca_entropy_weight": 0.1,
-            "train_ca_logit_norm": 0.1,
-        }
+        },
+        "simple_cil_max": {
+            "train_ca": False,
+            "train_merge": "max",
+        },
+        "simple_nme_max": {
+            "train_ca": False,
+            "train_merge": "max",
+            "model_classifier": ["nme"],
+        },
     }
     
     for dataset_name in DATA_TABLE.keys():
