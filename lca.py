@@ -89,16 +89,17 @@ class Learner:
                             )
                             raise optuna.TrialPruned()
             
-            try:
-                best_value = self.study.best_value
-            except Exception:
-                best_value = None
-            if best_value is not None:
-                if self._acc < best_value:
-                    logging.info(
-                        f"[Pruning] Acc {self._acc:.2f} < best value {best_value:.2f} at task {task}"
-                    )
-                    raise optuna.TrialPruned()
+                if task < num_tasks - 1:
+                    try:
+                        best_value = self.study.best_value
+                    except Exception:
+                        best_value = None
+                    if best_value is not None:
+                        if self._acc < best_value:
+                            logging.info(
+                                f"[Pruning] Acc {self._acc:.2f} < best value {best_value:.2f} at task {task}"
+                            )
+                            raise optuna.TrialPruned()
                 
 
         logging.info(f"[Evaluation] Final accuracy history: {self._acc_history}")
@@ -834,7 +835,7 @@ def run_experiments():
         print(f"Starting experiments for dataset: {dataset_name}")
         print(f"{'='*60}")
 
-        logfilename = os.path.join(LOG_DIR, f"nme_{dataset_name}.log")
+        logfilename = os.path.join(LOG_DIR, f"base_{dataset_name}.log")
         for handler in logging.root.handlers[:]:
             logging.root.removeHandler(handler)
         logging.basicConfig(
