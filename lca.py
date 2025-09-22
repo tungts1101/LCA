@@ -100,9 +100,17 @@ class Learner:
                                 f"[Pruning] Acc {self._acc:.2f} < best value {best_value:.2f} at task {task}"
                             )
                             raise optuna.TrialPruned()
-                
 
         logging.info(f"[Evaluation] Final accuracy history: {self._acc_history}")
+
+        if self._config.get("train_save_model", False):
+            postfix = self._config.get("train_checkpoint_postfix", "")
+            filename = f"{self.prefix()}_alignment_{postfix}.pt"
+            logging.info(f"[Alignment] Save aligned model at {filename}")
+            torch.save(
+                self.model.state_dict(),
+                self.alignment_checkpoint(filename)
+            )
 
     def before_task(self, task, data_manager):
         task_size = data_manager.get_task_size(task)
@@ -199,7 +207,7 @@ class Learner:
         self.model.train()
         self.model.cuda()
 
-        if not os.path.exists(self.backbone_checkpoint(self._cur_task)):
+        if not os.path.exists(self.backbone_checkpoint(self._cur_task)) or self._config.get("reset", False):
             trainset = self.data_manager.get_dataset(
                 np.arange(self._known_classes, self._total_classes),
                 source="train",
@@ -315,7 +323,7 @@ class Learner:
             self.merge()
 
     def merge(self):
-        if os.path.exists(self.merged_checkpoint(self._cur_task)):
+        if os.path.exists(self.merged_checkpoint(self._cur_task)) and not self._config.get("reset", False):
             logging.info(f"[Merging] Load merged checkpoint for task {self._cur_task}")
             backbone_params = torch.load(self.merged_checkpoint(self._cur_task))
             self.load_backbone(backbone_params)
@@ -690,6 +698,9 @@ class Learner:
     def classifier_checkpoint(self, task):
         filename = f"{self.prefix()}_head_{task}.pt"
         return os.path.join(CHECKPOINT_DIR, filename)
+    
+    def alignment_checkpoint(self, filename):
+        return os.path.join(CHECKPOINT_DIR, filename)
 
     def load_backbone(self, backbone_params):
         peft_params = {}
@@ -706,18 +717,18 @@ class Learner:
 
 
 DATA_TABLE = {
-    # "cifar224": [(10, 10, 10)],
+    "cifar224": [(10, 10, 10)],
     # "imagenetr": [(10, 20, 20)],
     # "imageneta": [(10, 20, 20)],
     # "cub": [(10, 20, 20)],
     # "omnibenchmark": [(10, 30, 30)],
     # "vtab": [(5, 10, 10)],
-    "cars": [(10, 16, 20)]
+    # "cars": [(10, 16, 20)]
 }
 
 BASE_CONFIG = {
     "seed": 1993,
-    "reset": True,
+    "reset": False,
     "train_epochs": 10,
     "train_batch_size": 64,
     "train_base_lr": 1e-2,
@@ -738,8 +749,9 @@ BASE_CONFIG = {
     "train_ca_epochs": 10,
 }
 
-def run_single_experiment(dataset_name, config_name, experiment_config):
+def run_single_experiment(dataset_name, config_name, experiment_config, seed):
     config = copy.deepcopy(BASE_CONFIG)
+    config["seed"] = seed
 
     set_random(config["seed"])
     
@@ -761,10 +773,22 @@ def run_single_experiment(dataset_name, config_name, experiment_config):
         False,
     )
 
-    config.update(experiment_config)
+    if config_name == "best_params":
+        updated_config = experiment_config.get(dataset_name, {})
+        if not updated_config:
+            return
+        config["train_ca"] = True
+        config["train_ca_lr"] = updated_config.get("train_ca_lr", 1e-2)
+        config["train_ca_robust_weight"] = 10 ** updated_config.get("robust_weight_log", 0.0)
+        config["train_ca_entropy_weight"] = 10 ** updated_config.get("entropy_weight_log", 0.0)
+        config["train_ca_logit_norm"] = updated_config.get("train_ca_logit_norm", None)
+        config["train_save_model"] = True
+        config["train_checkpoint_postfix"] = "best_params"
+    else:
+        config.update(experiment_config)
     
     experiment_name = f"{dataset_name}_{config_name}"
-    
+    result = {}
     try:
         logging.info(config)
 
@@ -786,6 +810,11 @@ def run_single_experiment(dataset_name, config_name, experiment_config):
         del learner
         torch.cuda.empty_cache()
         gc.collect()
+
+        result["mlp_faa"] = mlp_faa
+        result["mlp_asa"] = mlp_asa
+        result["nme_faa"] = nme_faa
+        result["nme_asa"] = nme_asa
     except Exception as e:
         import traceback
         error_details = traceback.format_exc()
@@ -794,40 +823,101 @@ def run_single_experiment(dataset_name, config_name, experiment_config):
         logging.error(f"Exception Message: {str(e)}")
         logging.error(f"Full Traceback:\n{error_details}")
 
+        result["mlp_faa"] = 0.0
+        result["mlp_asa"] = 0.0
+        result["nme_faa"] = 0.0
+        result["nme_asa"] = 0.0
+
+    return result
+
 
 def run_experiments():
+    seeds = [1993, 1994, 1995]
+
     experiment_configs = {
-        "simple_cil": {
-            "train_ca": False,
-        },
-        "simple_ca": {
+        # "simple_cil": {
+        #     "train_ca": False,
+        #     "train_save_model": True,
+        #     "train_checkpoint_postfix": "simple_cil"
+        # },
+        # "simple_ca": {
+        #     "train_ca": True,
+        #     "train_ca_epochs": 10,
+        #     "train_ca_lr": 1e-2,
+        #     "train_ca_samples_per_cls": 512,
+        #     "train_ca_batch_size": 128,
+        #     "train_save_model": True,
+        #     "train_checkpoint_postfix": "simple_ca"
+        # },
+        # "simple_nme": {
+        #     "train_ca": False,
+        #     "model_classifier": ["nme"],
+        # },
+        # "nme_lca": {
+        #     "train_ca": True,
+        #     "model_classifier": ["nme"],
+        #     "train_ca_epochs": 10,
+        #     "train_ca_lr": 1e-2,
+        #     "train_ca_samples_per_cls": 512,
+        #     "train_ca_batch_size": 128,
+        # },
+        # "simple_cil_max": {
+        #     "train_ca": False,
+        #     "train_merge": "max",
+        # },
+        # "simple_nme_max": {
+        #     "train_ca": False,
+        #     "train_merge": "max",
+        #     "model_classifier": ["nme"],
+        # },
+        # "best_params": {
+        #     "cifar224": {
+        #         "train_ca_lr": 0.006780828620743064,
+        #         "robust_weight_log": 1.7257445041897386,
+        #         "entropy_weight_log": -0.5932296558536765,
+        #         "train_ca_logit_norm": 0.25655646296720064
+        #     },
+        #     "imagenetr": {
+        #         "train_ca_lr": 0.0006040296796289436,
+        #         "robust_weight_log": -1.5143591470122146,
+        #         "entropy_weight_log": -0.06898465991291017,
+        #         "train_ca_logit_norm": None
+        #     },
+        #     "imageneta": {
+        #         "train_ca_lr": 0.008314372357632426,
+        #         "robust_weight_log": 1.4678139501636418,
+        #         "entropy_weight_log": -1.140337158446757,
+        #         "train_ca_logit_norm": 0.15283482894406505
+        #     },
+        #     "cub": {
+        #         "train_ca_lr": 0.0031216997301710394,
+        #         "robust_weight_log": -1.8048302917571353,
+        #         "entropy_weight_log": -1.1298609337314616,
+        #         "train_ca_logit_norm": 0.14767997008723183
+        #     },
+        #     "omnibenchmark": {
+        #         "train_ca_lr": 0.005768071127603539,
+        #         "robust_weight_log": 0.3125471221726329,
+        #         "entropy_weight_log": -1.5171715963644838,
+        #         "train_ca_logit_norm": 0.13749933915971782
+        #     },
+        #     "vtab": {
+        #         "train_ca_lr": 0.008462372699358749,
+        #         "robust_weight_log": -1.2375251863603873,
+        #         "entropy_weight_log": -0.3407841513733987,
+        #         "train_ca_logit_norm": 0.2840606068326101
+        #     }
+        # },
+        "base_lca": {
             "train_ca": True,
             "train_ca_epochs": 10,
-            "train_ca_lr": 1e-2,
+            "train_ca_lr": 5e-3,
             "train_ca_samples_per_cls": 512,
             "train_ca_batch_size": 128,
-        },
-        "simple_nme": {
-            "train_ca": False,
-            "model_classifier": ["nme"],
-        },
-        "nme_lca": {
-            "train_ca": True,
-            "model_classifier": ["nme"],
-            "train_ca_epochs": 10,
-            "train_ca_lr": 1e-2,
-            "train_ca_samples_per_cls": 512,
-            "train_ca_batch_size": 128,
-        },
-        "simple_cil_max": {
-            "train_ca": False,
-            "train_merge": "max",
-        },
-        "simple_nme_max": {
-            "train_ca": False,
-            "train_merge": "max",
-            "model_classifier": ["nme"],
-        },
+            "train_ca_robust_weight": 50,
+            "train_ca_entropy_weight": 0.0,
+            "train_ca_logit_norm": 0.1,
+        }
     }
     
     for dataset_name in DATA_TABLE.keys():
@@ -835,26 +925,74 @@ def run_experiments():
         print(f"Starting experiments for dataset: {dataset_name}")
         print(f"{'='*60}")
 
-        logfilename = os.path.join(LOG_DIR, f"base_{dataset_name}.log")
-        for handler in logging.root.handlers[:]:
-            logging.root.removeHandler(handler)
-        logging.basicConfig(
-            level=logging.INFO,
-            format="%(asctime)s [%(filename)s] => %(message)s",
-            handlers=[
-                logging.FileHandler(filename=logfilename),
-                logging.StreamHandler(sys.stdout),
-            ],
-            force=True
-        )
+        # Collect results for this dataset
+        dataset_results = {}
+        
+        for seed in seeds:
+            logfilename = os.path.join(LOG_DIR, f"{dataset_name}.log")
+            for handler in logging.root.handlers[:]:
+                logging.root.removeHandler(handler)
+            logging.basicConfig(
+                level=logging.INFO,
+                format="%(asctime)s [%(filename)s] => %(message)s",
+                handlers=[
+                    logging.FileHandler(filename=logfilename),
+                    logging.StreamHandler(sys.stdout),
+                ],
+                force=True
+            )
 
-        for config_name, config in experiment_configs.items():
-            logging.info("=" * 80)
-            logging.info(f"Starting experiment: {dataset_name} - {config_name}")
-            experiment_start_time = time.time()
-            run_single_experiment(dataset_name, config_name, config)
-            experiment_end_time = time.time()
-            logging.info(f"Experiment {dataset_name}_{config_name} time: {experiment_end_time - experiment_start_time:.2f} seconds")
+            for config_name, config in experiment_configs.items():
+                logging.info("=" * 80)
+                logging.info(f"Starting experiment: {dataset_name} - {config_name} - seed {seed}")
+                experiment_start_time = time.time()
+                result = run_single_experiment(dataset_name, config_name, config, seed)
+                experiment_end_time = time.time()
+                logging.info(f"Experiment {dataset_name}_{config_name}_seed{seed} time: {experiment_end_time - experiment_start_time:.2f} seconds")
+                
+                # Store result with seed information
+                if config_name not in dataset_results:
+                    dataset_results[config_name] = {
+                        'seeds': [],
+                        'mlp_faa': [],
+                        'mlp_asa': [],
+                        'nme_faa': [],
+                        'nme_asa': []
+                    }
+                
+                dataset_results[config_name]['seeds'].append(seed)
+                dataset_results[config_name]['mlp_faa'].append(result.get('mlp_faa', 0.0))
+                dataset_results[config_name]['mlp_asa'].append(result.get('mlp_asa', 0.0))
+                dataset_results[config_name]['nme_faa'].append(result.get('nme_faa', 0.0))
+                dataset_results[config_name]['nme_asa'].append(result.get('nme_asa', 0.0))
+        
+        # Summarize results for this dataset
+        logging.info("\n" + "="*80)
+        logging.info(f"SUMMARY FOR {dataset_name.upper()} DATASET")
+        logging.info("="*80)
+        
+        for config_name, results in dataset_results.items():
+            if len(results['mlp_asa']) > 0:
+                mlp_asa_mean = np.mean(results['mlp_asa'])
+                mlp_asa_std = np.std(results['mlp_asa'])
+                mlp_faa_mean = np.mean(results['mlp_faa'])
+                mlp_faa_std = np.std(results['mlp_faa'])
+                
+                logging.info(f"\n{config_name.upper()}:")
+                logging.info(f"  Seeds: {results['seeds']}")
+                logging.info(f"  MLP - ASA: {mlp_asa_mean:.2f} ± {mlp_asa_std:.2f}")
+                logging.info(f"  MLP - FAA: {mlp_faa_mean:.2f} ± {mlp_faa_std:.2f}")
+                
+                nme_asa_mean = np.mean(results['nme_asa'])
+                nme_asa_std = np.std(results['nme_asa'])
+                nme_faa_mean = np.mean(results['nme_faa'])
+                nme_faa_std = np.std(results['nme_faa'])
+                
+                logging.info(f"  NME - ASA: {nme_asa_mean:.2f} ± {nme_asa_std:.2f}")
+                logging.info(f"  NME - FAA: {nme_faa_mean:.2f} ± {nme_faa_std:.2f}")
+        
+        logging.info(f"\nCompleted all experiments for {dataset_name}")
+        logging.info("="*80)
 
 if __name__ == "__main__":
     start_time = time.time()
