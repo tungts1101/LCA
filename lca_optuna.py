@@ -92,7 +92,7 @@ def objective(data_manager, study, trial, config):
         )
 
         learner = Learner(
-            config, study=study, trial=trial, pruning_thresholds=pruning_thresholds[config["dataset_name"]].copy()
+            config, study=study, trial=trial, pruning_thresholds=pruning_thresholds.copy()
         )
         learner.learn(data_manager)
 
@@ -272,8 +272,6 @@ if __name__ == "__main__":
     parser.add_argument(
         "--dataset",
         type=str,
-        choices=list(DATA_TABLE.keys()) + ["all"],
-        help=f"Dataset to optimize on. Available: {list(DATA_TABLE.keys())}",
     )
     parser.add_argument(
         "--n_trials", type=int, default=100, help="Number of optimization trials"
@@ -289,7 +287,7 @@ if __name__ == "__main__":
     )
 
     args = parser.parse_args()
-    seeds = [1993, 1994, 1995]
+    seeds = [1994, 1995]
     
     if args.dataset == "all":
         for dataset in DATA_TABLE.keys():

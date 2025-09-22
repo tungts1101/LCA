@@ -718,12 +718,12 @@ class Learner:
 
 DATA_TABLE = {
     "cifar224": [(10, 10, 10)],
-    # "imagenetr": [(10, 20, 20)],
-    # "imageneta": [(10, 20, 20)],
-    # "cub": [(10, 20, 20)],
-    # "omnibenchmark": [(10, 30, 30)],
-    # "vtab": [(5, 10, 10)],
-    # "cars": [(10, 16, 20)]
+    "imagenetr": [(10, 20, 20)],
+    "imageneta": [(10, 20, 20)],
+    "cub": [(10, 20, 20)],
+    "omnibenchmark": [(10, 30, 30)],
+    "vtab": [(5, 10, 10)],
+    "cars": [(10, 16, 20)]
 }
 
 BASE_CONFIG = {
@@ -840,15 +840,15 @@ def run_experiments():
         #     "train_save_model": True,
         #     "train_checkpoint_postfix": "simple_cil"
         # },
-        # "simple_ca": {
-        #     "train_ca": True,
-        #     "train_ca_epochs": 10,
-        #     "train_ca_lr": 1e-2,
-        #     "train_ca_samples_per_cls": 512,
-        #     "train_ca_batch_size": 128,
-        #     "train_save_model": True,
-        #     "train_checkpoint_postfix": "simple_ca"
-        # },
+        "simple_ca": {
+            "train_ca": True,
+            "train_ca_epochs": 10,
+            "train_ca_lr": 1e-2,
+            "train_ca_samples_per_cls": 512,
+            "train_ca_batch_size": 128,
+            # "train_save_model": True,
+            # "train_checkpoint_postfix": "simple_ca"
+        },
         # "simple_nme": {
         #     "train_ca": False,
         #     "model_classifier": ["nme"],
@@ -908,16 +908,16 @@ def run_experiments():
         #         "train_ca_logit_norm": 0.2840606068326101
         #     }
         # },
-        "base_lca": {
-            "train_ca": True,
-            "train_ca_epochs": 10,
-            "train_ca_lr": 1e-2,
-            "train_ca_samples_per_cls": 512,
-            "train_ca_batch_size": 128,
-            "train_ca_robust_weight": 0.1,
-            "train_ca_entropy_weight": 0.1,
-            "train_ca_logit_norm": 0.1,
-        }
+        # "base_lca": {
+        #     "train_ca": True,
+        #     "train_ca_epochs": 10,
+        #     "train_ca_lr": 1e-2,
+        #     "train_ca_samples_per_cls": 512,
+        #     "train_ca_batch_size": 128,
+        #     "train_ca_robust_weight": 0.1,
+        #     "train_ca_entropy_weight": 0.1,
+        #     "train_ca_logit_norm": 0.1,
+        # }
     }
     
     for dataset_name in DATA_TABLE.keys():
@@ -979,6 +979,8 @@ def run_experiments():
                 mlp_faa_std = np.std(results['mlp_faa'])
                 
                 logging.info(f"\n{config_name.upper()}:")
+                config = experiment_configs.get(config_name, {})
+                logging.info(f"  Configuration: {config}")
                 logging.info(f"  Seeds: {results['seeds']}")
                 logging.info(f"  MLP - ASA: {mlp_asa_mean:.2f} ± {mlp_asa_std:.2f}")
                 logging.info(f"  MLP - FAA: {mlp_faa_mean:.2f} ± {mlp_faa_std:.2f}")
