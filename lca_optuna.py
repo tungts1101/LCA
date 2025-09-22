@@ -143,7 +143,7 @@ def objective(data_manager, study, trial, config):
 def run_optuna_optimization(
     dataset_name, n_trials=150, early_stop_patience=None, max_time_hours=None, seed=1993
 ):
-    logfilename = os.path.join(LOG_DIR, f"optuna_{dataset_name}.log")
+    logfilename = os.path.join(LOG_DIR, f"optuna_{dataset_name}_seed{seed}.log")
     for handler in logging.root.handlers[:]:
         logging.root.removeHandler(handler)
     logging.basicConfig(
@@ -171,7 +171,7 @@ def run_optuna_optimization(
     sampler = TPESampler(seed=seed)
     pruner = MedianPruner(n_startup_trials=5, n_warmup_steps=2)
 
-    study_name = f"optuna_{dataset_name}"
+    study_name = f"optuna_{dataset_name}_seed{seed}"
     db_path = Path(OPTUNA_DIR) / f"{study_name}.db"
     storage_name = f"sqlite:///{db_path}"
 
