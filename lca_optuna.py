@@ -34,13 +34,21 @@ os.makedirs(OPTUNA_DIR, exist_ok=True)
 # omnibenchmark: 94.5, 93.25, 91.57, 89.34, 87.5, 85.89, 84.52, 83.13, 81.78, 80.5
 # vtab: 99.52, 98.64, 97.06, 95.92, 94.57
 
-EARLY_PRUNING_THRESHOLDS = {
-    "cifar224": {1: 98, 3: 97, 5: 96, 7: 95},
-    "imagenetr": {1: 92, 3: 90, 5: 87, 7: 86},
-    "imageneta": {1: 86, 3: 81, 5: 78, 7: 75},
-    "cub": {1: 97, 3: 95, 5: 93, 7: 91},
-    "omnibenchmark": {1: 93, 3: 89, 5: 85, 7: 83},
-    "vtab": {1: 98, 3: 95}
+# EARLY_PRUNING_THRESHOLDS = {
+#     "cifar224": {1: 98, 3: 97, 5: 96, 7: 95},
+#     "imagenetr": {1: 92, 3: 90, 5: 87, 7: 86},
+#     "imageneta": {1: 86, 3: 81, 5: 78, 7: 75},
+#     "cub": {1: 97, 3: 95, 5: 93, 7: 91},
+#     "omnibenchmark": {1: 93, 3: 89, 5: 85, 7: 83},
+#     "vtab": {1: 98, 3: 95}
+# }
+pruning_thresholds = {
+    "cifar224": {1: 0.0, 3: 0.0, 5: 0.0, 7: 0.0},
+    "imagenetr": {1: 0.0, 3: 0.0, 5: 0.0, 7: 0.0},
+    "imageneta": {1: 0.0, 3: 0.0, 5: 0.0, 7: 0.0},
+    "cub": {1: 0.0, 3: 0.0, 5: 0.0, 7: 0.0},
+    "omnibenchmark": {1: 0.0, 3: 0.0, 5: 0.0, 7: 0.0},
+    "vtab": {1: 0.0, 3: 0.0}
 }
 
 
@@ -72,21 +80,29 @@ def suggest_hyperparameters(trial):
 
 
 def objective(data_manager, study, trial, config):
+    global pruning_thresholds
     trial_start_time = time.time()
     try:
         hyperparams = suggest_hyperparameters(trial)
         config.update(hyperparams)
 
+        logging.info(f"\n Pruning thresholds: {pruning_thresholds}")
         logging.info(
             f"\n[Trial {trial.number}] Starting optimization with hyperparameters: {hyperparams}"
         )
 
         learner = Learner(
-            config, study=study, trial=trial, pruning_thresholds=EARLY_PRUNING_THRESHOLDS.copy()
+            config, study=study, trial=trial, pruning_thresholds=pruning_thresholds[config["dataset_name"]].copy()
         )
         learner.learn(data_manager)
 
         acc = learner._acc
+        history_acc = learner._acc_history
+
+        for task_id, task_acc in enumerate(history_acc):
+            if task_id in pruning_thresholds[config["dataset_name"]]:
+                threshold = pruning_thresholds[config["dataset_name"]][task_id]
+                pruning_thresholds[config["dataset_name"]][task_id] = max(threshold, task_acc)
 
         trial_end_time = time.time()
         trial_duration = trial_end_time - trial_start_time
@@ -125,7 +141,7 @@ def objective(data_manager, study, trial, config):
 
 
 def run_optuna_optimization(
-    dataset_name, n_trials=150, early_stop_patience=None, max_time_hours=None
+    dataset_name, n_trials=150, early_stop_patience=None, max_time_hours=None, seed=1993
 ):
     logfilename = os.path.join(LOG_DIR, f"optuna_{dataset_name}.log")
     for handler in logging.root.handlers[:]:
@@ -152,7 +168,7 @@ def run_optuna_optimization(
     if max_time_hours is not None:
         logging.info(f"Time limit enabled: maximum {max_time_hours} hours")
 
-    sampler = TPESampler(seed=BASE_CONFIG["seed"])
+    sampler = TPESampler(seed=seed)
     pruner = MedianPruner(n_startup_trials=5, n_warmup_steps=2)
 
     study_name = f"optuna_{dataset_name}"
@@ -207,6 +223,7 @@ def run_optuna_optimization(
                     study.stop()
 
     config = copy.deepcopy(BASE_CONFIG)
+    config["seed"] = seed
     config["train_ca"] = True
     config["train_ca_samples_per_cls"] = 512
     config["train_ca_batch_size"] = 128
@@ -272,20 +289,25 @@ if __name__ == "__main__":
     )
 
     args = parser.parse_args()
+    seeds = [1993, 1994, 1995]
     
     if args.dataset == "all":
         for dataset in DATA_TABLE.keys():
             args.dataset = dataset
+            for seed in seeds:
+                run_optuna_optimization(
+                    dataset_name=args.dataset,
+                    n_trials=args.n_trials,
+                    early_stop_patience=args.early_stop_patience,
+                    max_time_hours=args.max_time_hours,
+                    seed=seed,
+                )
+    else:
+        for seed in seeds:
             run_optuna_optimization(
                 dataset_name=args.dataset,
                 n_trials=args.n_trials,
                 early_stop_patience=args.early_stop_patience,
                 max_time_hours=args.max_time_hours,
+                seed=seed,
             )
-    else:
-        run_optuna_optimization(
-            dataset_name=args.dataset,
-            n_trials=args.n_trials,
-            early_stop_patience=args.early_stop_patience,
-            max_time_hours=args.max_time_hours,
-        )

@@ -911,11 +911,11 @@ def run_experiments():
         "base_lca": {
             "train_ca": True,
             "train_ca_epochs": 10,
-            "train_ca_lr": 5e-3,
+            "train_ca_lr": 1e-2,
             "train_ca_samples_per_cls": 512,
             "train_ca_batch_size": 128,
-            "train_ca_robust_weight": 50,
-            "train_ca_entropy_weight": 0.0,
+            "train_ca_robust_weight": 0.1,
+            "train_ca_entropy_weight": 0.1,
             "train_ca_logit_norm": 0.1,
         }
     }
