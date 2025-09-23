@@ -957,18 +957,18 @@ def run_experiments():
                 logging.info(f"Starting experiment: {dataset_name} - {config_name} - seed {seed}")
 
                 config['vpt_type'] = 'deep'
-                config['prompt_token_num'] = 5
+                config['prompt_token_num'] = 64
                 config['ffn_num'] = 64
 
                 for backbone in [
-                    "pretrained_vit_b16_224_ssf",
-                    "pretrained_vit_b16_224_in21k_ssf",
+                    # "pretrained_vit_b16_224_ssf",
+                    # "pretrained_vit_b16_224_in21k_ssf",
                     "pretrained_vit_b16_224_vpt",
                     "pretrained_vit_b16_224_in21k_vpt",
-                    "pretrained_vit_b16_224_adapter",
-                    "pretrained_vit_b16_224_in21k_adapter",
-                    "vit_base_patch16_224_lora", 
-                    "vit_base_patch16_224_in21k_lora",
+                    # "pretrained_vit_b16_224_adapter",
+                    # "pretrained_vit_b16_224_in21k_adapter",
+                    # "vit_base_patch16_224_lora", 
+                    # "vit_base_patch16_224_in21k_lora",
                 ]:
                     config["model_backbone"] = backbone
                     logging.info(f"Using backbone: {backbone}")
