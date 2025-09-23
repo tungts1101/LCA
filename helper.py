@@ -181,6 +181,10 @@ def get_backbone(args):
         elif name == "pretrained_vit_b16_224_in21k_ssf":
             model = timm.create_model("vit_base_patch16_224_in21k_ssf", pretrained=True, num_classes=0)
             model.out_dim = 768
+        
+        for name, param in model.named_parameters():
+            if "ssf_scale" not in name and "ssf_shift_" not in name: 
+                param.requires_grad = False
         return model.eval()
     elif '_vpt' in name:
         from backbone.vpt import build_promptmodel
@@ -199,6 +203,10 @@ def get_backbone(args):
         prompt_state_dict = model.obtain_prompt()
         model.load_prompt(prompt_state_dict)
         model.out_dim = 768
+        
+        for param_name, param in model.named_parameters():
+            if "prompt" not in param_name.lower():
+                param.requires_grad = False
         return model.eval()
     elif '_adapter' in name:
         ffn_num = args["ffn_num"]
@@ -227,6 +235,10 @@ def get_backbone(args):
             model.out_dim=768
         else:
             raise NotImplementedError("Unknown type {}".format(name))
+        
+        for param_name, param in model.named_parameters():
+            if "adapter" not in param_name.lower():
+                param.requires_grad = False
         return model.eval()
     else:
         raise NotImplementedError("Unknown type {}".format(name))
@@ -322,45 +334,10 @@ class Model(nn.Module):
 
     def get_backbone_trainable_params(self):
         params = {}
-        backbone_name = self._config.get("model_backbone", "").lower()
-        
-        # For different backbone types, use different strategies to identify trainable params
-        if "_ssf" in backbone_name:
-            # For SSF, collect ssf_scale and ssf_shift parameters and ensure they're trainable
-            for name, param in self.backbone.named_parameters():
-                if "ssf_scale" in name or "ssf_shift" in name:
-                    param.requires_grad = True  # Ensure SSF parameters are trainable
-                    params[name] = param
-                elif param.requires_grad:
-                    params[name] = param
-        elif "lora" in backbone_name:
-            # For LoRA, collect lora parameters (should already have requires_grad=True)
-            for name, param in self.backbone.named_parameters():
-                if param.requires_grad:
-                    params[name] = param
-        elif "_vpt" in backbone_name:
-            # For VPT, collect prompt-related parameters and ensure they're trainable
-            for name, param in self.backbone.named_parameters():
-                if "prompt" in name.lower():
-                    param.requires_grad = True  # Ensure prompt parameters are trainable
-                    params[name] = param
-                elif param.requires_grad:
-                    params[name] = param
-        elif "_adapter" in backbone_name:
-            # For Adapter, collect adapter-related parameters and ensure they're trainable
-            for name, param in self.backbone.named_parameters():
-                if "adapter" in name.lower():
-                    param.requires_grad = True  # Ensure adapter parameters are trainable
-                    params[name] = param
-                elif param.requires_grad:
-                    params[name] = param
-        else:
-            # Default behavior for other backbones
-            for name, param in self.backbone.named_parameters():
-                if param.requires_grad:
-                    params[name] = param
+        for name, param in self.backbone.named_parameters():
+            if param.requires_grad:
+                params[name] = param
 
-        # Always include norm layer parameters if they exist and are trainable
         if self.norm is not None:
             for name, param in self.norm.named_parameters():
                 if param.requires_grad:
