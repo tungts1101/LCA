@@ -148,25 +148,88 @@ def accuracy(y_pred, y_true, class_increments):
 
 
 # Backbone ====================================================================
-def get_backbone(config):
-    if "lora" in config["model_backbone"]:
-        model = timm.create_model(
-            config["model_backbone"][:-5], pretrained=True, num_classes=0
-        )
-
+def get_backbone(args):
+    name = args["model_backbone"].lower()
+    # SimpleCIL or SimpleCIL w/ Finetune
+    if name == "pretrained_vit_b16_224" or name == "vit_base_patch16_224":
+        model = timm.create_model("vit_base_patch16_224",pretrained=True, num_classes=0)
+        model.out_dim = 768
+        return model.eval()
+    elif name == "pretrained_vit_b16_224_in21k" or name == "vit_base_patch16_224_in21k":
+        model = timm.create_model("vit_base_patch16_224_in21k",pretrained=True, num_classes=0)
+        model.out_dim = 768
+        return model.eval()
+    elif "lora" in name:
+        model = timm.create_model(name[:-5], pretrained=True, num_classes=0)
         model.requires_grad_(False)
+        model.out_dim = 768
         lora_config = LoraConfig(
-            r=config.get("model_lora_r", 64),
-            lora_alpha=config.get("model_lora_alpha", 128),
-            target_modules=config.get("model_lora_target_modules", ["qkv", "proj"]),
-            lora_dropout=config.get("model_lora_dropout", 0.0),
+            r=args["model_lora_r"],
+            lora_alpha=args["model_lora_alpha"],
+            target_modules=args["model_lora_target_modules"],
+            lora_dropout=args["model_lora_dropout"],
             bias="none",
             init_lora_weights="gaussian",
         )
         model = get_peft_model(model, lora_config)
         return model
+    elif '_ssf' in name:
+        from backbone import vit_ssf
+        if name == "pretrained_vit_b16_224_ssf":
+            model = timm.create_model("vit_base_patch16_224_ssf", pretrained=True, num_classes=0)
+            model.out_dim = 768
+        elif name == "pretrained_vit_b16_224_in21k_ssf":
+            model = timm.create_model("vit_base_patch16_224_in21k_ssf", pretrained=True, num_classes=0)
+            model.out_dim = 768
+        return model.eval()
+    elif '_vpt' in name:
+        from backbone.vpt import build_promptmodel
+        if name == "pretrained_vit_b16_224_vpt":
+            basicmodelname = "vit_base_patch16_224" 
+        elif name == "pretrained_vit_b16_224_in21k_vpt":
+            basicmodelname = "vit_base_patch16_224_in21k"
+        
+        print("modelname,", name, "basicmodelname", basicmodelname)
+        VPT_type = "Deep"
+        if args["vpt_type"] == 'shallow':
+            VPT_type = "Shallow"
+        Prompt_Token_num = args["prompt_token_num"]
+
+        model = build_promptmodel(modelname=basicmodelname, Prompt_Token_num=Prompt_Token_num, VPT_type=VPT_type)
+        prompt_state_dict = model.obtain_prompt()
+        model.load_prompt(prompt_state_dict)
+        model.out_dim = 768
+        return model.eval()
+    elif '_adapter' in name:
+        ffn_num = args["ffn_num"]
+        from backbone import vit_adapter
+        from easydict import EasyDict
+        tuning_config = EasyDict(
+            # AdaptFormer
+            ffn_adapt=True,
+            ffn_option="parallel",
+            ffn_adapter_layernorm_option="none",
+            ffn_adapter_init_option="lora",
+            ffn_adapter_scalar="0.1",
+            ffn_num=ffn_num,
+            d_model=768,
+            # VPT related
+            vpt_on=False,
+            vpt_num=0,
+        )
+        if name == "pretrained_vit_b16_224_adapter":
+            model = vit_adapter.vit_base_patch16_224_adapter(num_classes=0,
+                global_pool=False, drop_path_rate=0.0, tuning_config=tuning_config)
+            model.out_dim=768
+        elif name == "pretrained_vit_b16_224_in21k_adapter":
+            model = vit_adapter.vit_base_patch16_224_in21k_adapter(num_classes=0,
+                global_pool=False, drop_path_rate=0.0, tuning_config=tuning_config)
+            model.out_dim=768
+        else:
+            raise NotImplementedError("Unknown type {}".format(name))
+        return model.eval()
     else:
-        raise NotImplementedError("Inconsistent model name and model type")
+        raise NotImplementedError("Unknown type {}".format(name))
 
 
 # =============================================================================
