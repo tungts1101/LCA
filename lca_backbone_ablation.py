@@ -957,7 +957,7 @@ def run_experiments():
                 logging.info(f"Starting experiment: {dataset_name} - {config_name} - seed {seed}")
 
                 config['vpt_type'] = 'deep'
-                config['prompt_token_num'] = 64
+                config['prompt_token_num'] = 256
                 config['ffn_num'] = 64
 
                 for backbone in [
