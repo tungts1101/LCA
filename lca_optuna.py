@@ -48,34 +48,40 @@ pruning_thresholds = {
     "imageneta": {1: 0.0, 3: 0.0, 5: 0.0, 7: 0.0},
     "cub": {1: 0.0, 3: 0.0, 5: 0.0, 7: 0.0},
     "omnibenchmark": {1: 0.0, 3: 0.0, 5: 0.0, 7: 0.0},
-    "vtab": {1: 0.0, 3: 0.0}
+    "vtab": {1: 0.0, 3: 0.0},
+    "cars": {1: 0.0, 3: 0.0, 5: 0.0, 7: 0.0},
 }
 
 
 def suggest_hyperparameters(trial):
-    # ca_lr = trial.suggest_categorical("train_ca_lr", [1e-4, 1e-3, 1e-2])
-    ca_lr = trial.suggest_float("train_ca_lr", 1e-4, 1e-2)
+    ca_lr = trial.suggest_categorical("train_ca_lr", [5e-4, 1e-3, 5e-3, 1e-2])
 
-    # robust_weight_log = trial.suggest_categorical("robust_weight_log", [-3, -2, -1, 0, 1, 2, 3])
-    robust_weight_log = trial.suggest_float("robust_weight_log", -3, 3)
-    robust_weight = 10**robust_weight_log
+    # robust_weight = trial.suggest_float("train_ca_rb_weight", 1e-2, 1e2)
+    robust_weight = trial.suggest_categorical("train_ca_rb_weight", [1e-2, 1e-1, 0, 1, 10, 100])
 
-    # entropy_weight_log = trial.suggest_categorical("entropy_weight_log", [-2, -1, 0, 1, 2])
-    entropy_weight_log = trial.suggest_float("entropy_weight_log", -3, 3)
-    entropy_weight = 10**entropy_weight_log
+    # entropy_weight = trial.suggest_float("train_ca_entropy_weight", 1e-2, 1e2)
+    entropy_weight = trial.suggest_categorical("train_ca_entropy_weight", [1e-2, 1e-1, 0, 1, 10, 100])
 
-    ca_logit_norm = trial.suggest_float("train_ca_logit_norm", 0.1, 0.5)
+    # ca_logit_norm = trial.suggest_float("train_ca_logit_norm", 0.1, 0.5)
+    ca_logit_norm = trial.suggest_categorical("train_ca_logit_norm", [None, 0.1, 0.5, 1.0])
+
+    model_backbone = trial.suggest_categorical("model_backbone", [
+        "pretrained_vit_b16_224_adapter",
+        "vit_base_patch16_224_lora"
+    ])
 
     ca_lr = round(ca_lr, 5)
     robust_weight = round(robust_weight, 5)
     entropy_weight = round(entropy_weight, 5)
     ca_logit_norm = round(ca_logit_norm, 2)
+    model_backbone = model_backbone    
 
     return {
         "train_ca_lr": ca_lr,
         "train_ca_rb_weight": robust_weight,
         "train_ca_entropy_weight": entropy_weight,
         "train_ca_logit_norm": ca_logit_norm,
+        "model_backbone": model_backbone
     }
 
 
@@ -285,9 +291,12 @@ if __name__ == "__main__":
     parser.add_argument(
         "--max_time_hours", type=float, default=24, help="Stop early after N hours"
     )
+    parser.add_argument(
+        "--seed", type=int, default=-1
+    )
 
     args = parser.parse_args()
-    seeds = [1994, 1995]
+    seeds = [1993, 1994, 1995] if args.seed == -1 else [args.seed]
     
     if args.dataset == "all":
         for dataset in DATA_TABLE.keys():

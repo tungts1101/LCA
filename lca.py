@@ -4,7 +4,6 @@ import torch.nn.functional as F
 from torch.utils.data import DataLoader
 import numpy as np
 import os
-from datetime import datetime
 from utils.data_manager import DataManager
 import gc
 import time
@@ -51,6 +50,7 @@ class Learner:
         torch.save(
             self.model.get_backbone_trainable_params(), self.backbone_checkpoint()
         )
+        print(self.model.get_backbone_info())
         self.nme_classifier = None
     
     def update_nme_classifier(self):
@@ -207,7 +207,7 @@ class Learner:
         self.model.train()
         self.model.cuda()
 
-        if not os.path.exists(self.backbone_checkpoint(self._cur_task)) or self._config.get("reset", False):
+        if (not os.path.exists(self.backbone_checkpoint(self._cur_task)) or self._config.get("reset_train", False)):
             trainset = self.data_manager.get_dataset(
                 np.arange(self._known_classes, self._total_classes),
                 source="train",
@@ -308,7 +308,7 @@ class Learner:
             self.model.classifier.heads[self._cur_task].load_state_dict(
                 torch.load(self.classifier_checkpoint(self._cur_task)), strict=True
             )
-        
+            
         if "nme" in self._config.get("model_classifier", ["mlp"]):
             self.update_nme_classifier()
 
@@ -323,7 +323,7 @@ class Learner:
             self.merge()
 
     def merge(self):
-        if os.path.exists(self.merged_checkpoint(self._cur_task)) and not self._config.get("reset", False):
+        if os.path.exists(self.merged_checkpoint(self._cur_task)) and not self._config.get("reset_merge", False):
             logging.info(f"[Merging] Load merged checkpoint for task {self._cur_task}")
             backbone_params = torch.load(self.merged_checkpoint(self._cur_task))
             self.load_backbone(backbone_params)
@@ -717,18 +717,19 @@ class Learner:
 
 
 DATA_TABLE = {
-    "cifar224": [(10, 10, 10)],
-    "imagenetr": [(10, 20, 20)],
-    "imageneta": [(10, 20, 20)],
+    # "cifar224": [(10, 10, 10)],
+    # "imagenetr": [(10, 20, 20)],
+    # "imageneta": [(10, 20, 20)],
     "cub": [(10, 20, 20)],
-    "omnibenchmark": [(10, 30, 30)],
-    "vtab": [(5, 10, 10)],
-    "cars": [(10, 16, 20)]
+    # "omnibenchmark": [(10, 30, 30)],
+    # "vtab": [(5, 10, 10)],
+    # "cars": [(10, 16, 20)]
 }
 
 BASE_CONFIG = {
     "seed": 1993,
-    "reset": False,
+    "reset_train": False,
+    "reset_merge": True,
     "train_epochs": 10,
     "train_batch_size": 64,
     "train_base_lr": 1e-2,
@@ -737,7 +738,8 @@ BASE_CONFIG = {
     "train_merge_coef": 1.0,
     "train_merge_topk": 100,
     "train_merge_incremental": True,
-    "model_backbone": "vit_base_patch16_224_lora",
+    "model_backbone": "pretrained_vit_b16_224_adapter",
+    "ffn_num": 16,
     "model_lora_r": 64,
     "model_lora_alpha": 128,
     "model_lora_dropout": 0.0,
@@ -832,7 +834,7 @@ def run_single_experiment(dataset_name, config_name, experiment_config, seed):
 
 
 def run_experiments():
-    seeds = [1993, 1994, 1995]
+    seeds = [1993]
 
     experiment_configs = {
         # "simple_cil": {
@@ -840,84 +842,27 @@ def run_experiments():
         #     "train_save_model": True,
         #     "train_checkpoint_postfix": "simple_cil"
         # },
-        "simple_ca": {
+        # "simple_ca": {
+        #     "train_ca": True,
+        #     "train_ca_epochs": 10,
+        #     "train_ca_lr": 1e-2,
+        #     "train_ca_samples_per_cls": 512,
+        #     "train_ca_batch_size": 128,
+        #     "train_save_model": True,
+        #     "train_checkpoint_postfix": "simple_ca"
+        # },
+        "base_lca": {
             "train_ca": True,
             "train_ca_epochs": 10,
-            "train_ca_lr": 1e-2,
+            "train_ca_lr": 5e-3,
             "train_ca_samples_per_cls": 512,
             "train_ca_batch_size": 128,
+            "train_ca_robust_weight": 0.1,
+            "train_ca_entropy_weight": 0.0,
+            "train_ca_logit_norm": None,
             # "train_save_model": True,
-            # "train_checkpoint_postfix": "simple_ca"
+            # "train_checkpoint_postfix": "base_lca"
         },
-        # "simple_nme": {
-        #     "train_ca": False,
-        #     "model_classifier": ["nme"],
-        # },
-        # "nme_lca": {
-        #     "train_ca": True,
-        #     "model_classifier": ["nme"],
-        #     "train_ca_epochs": 10,
-        #     "train_ca_lr": 1e-2,
-        #     "train_ca_samples_per_cls": 512,
-        #     "train_ca_batch_size": 128,
-        # },
-        # "simple_cil_max": {
-        #     "train_ca": False,
-        #     "train_merge": "max",
-        # },
-        # "simple_nme_max": {
-        #     "train_ca": False,
-        #     "train_merge": "max",
-        #     "model_classifier": ["nme"],
-        # },
-        # "best_params": {
-        #     "cifar224": {
-        #         "train_ca_lr": 0.006780828620743064,
-        #         "robust_weight_log": 1.7257445041897386,
-        #         "entropy_weight_log": -0.5932296558536765,
-        #         "train_ca_logit_norm": 0.25655646296720064
-        #     },
-        #     "imagenetr": {
-        #         "train_ca_lr": 0.0006040296796289436,
-        #         "robust_weight_log": -1.5143591470122146,
-        #         "entropy_weight_log": -0.06898465991291017,
-        #         "train_ca_logit_norm": None
-        #     },
-        #     "imageneta": {
-        #         "train_ca_lr": 0.008314372357632426,
-        #         "robust_weight_log": 1.4678139501636418,
-        #         "entropy_weight_log": -1.140337158446757,
-        #         "train_ca_logit_norm": 0.15283482894406505
-        #     },
-        #     "cub": {
-        #         "train_ca_lr": 0.0031216997301710394,
-        #         "robust_weight_log": -1.8048302917571353,
-        #         "entropy_weight_log": -1.1298609337314616,
-        #         "train_ca_logit_norm": 0.14767997008723183
-        #     },
-        #     "omnibenchmark": {
-        #         "train_ca_lr": 0.005768071127603539,
-        #         "robust_weight_log": 0.3125471221726329,
-        #         "entropy_weight_log": -1.5171715963644838,
-        #         "train_ca_logit_norm": 0.13749933915971782
-        #     },
-        #     "vtab": {
-        #         "train_ca_lr": 0.008462372699358749,
-        #         "robust_weight_log": -1.2375251863603873,
-        #         "entropy_weight_log": -0.3407841513733987,
-        #         "train_ca_logit_norm": 0.2840606068326101
-        #     }
-        # },
-        # "base_lca": {
-        #     "train_ca": True,
-        #     "train_ca_epochs": 10,
-        #     "train_ca_lr": 1e-2,
-        #     "train_ca_samples_per_cls": 512,
-        #     "train_ca_batch_size": 128,
-        #     "train_ca_robust_weight": 0.1,
-        #     "train_ca_entropy_weight": 0.1,
-        #     "train_ca_logit_norm": 0.1,
-        # }
     }
     
     for dataset_name in DATA_TABLE.keys():
@@ -929,20 +874,22 @@ def run_experiments():
         dataset_results = {}
         
         for seed in seeds:
-            logfilename = os.path.join(LOG_DIR, f"{dataset_name}.log")
-            for handler in logging.root.handlers[:]:
-                logging.root.removeHandler(handler)
-            logging.basicConfig(
-                level=logging.INFO,
-                format="%(asctime)s [%(filename)s] => %(message)s",
-                handlers=[
-                    logging.FileHandler(filename=logfilename),
-                    logging.StreamHandler(sys.stdout),
-                ],
-                force=True
-            )
-
             for config_name, config in experiment_configs.items():
+                dir_path = os.path.join(LOG_DIR, dataset_name, str(seed), config_name)
+                os.makedirs(dir_path, exist_ok=True)
+
+                logfilename = os.path.join(dir_path, f"{BASE_CONFIG['model_backbone']}.log")
+                for handler in logging.root.handlers[:]:
+                    logging.root.removeHandler(handler)
+                logging.basicConfig(
+                    level=logging.INFO,
+                    format="%(asctime)s [%(filename)s] => %(message)s",
+                    handlers=[
+                        logging.FileHandler(filename=logfilename),
+                        logging.StreamHandler(sys.stdout),
+                    ],
+                    force=True
+                )
                 logging.info("=" * 80)
                 logging.info(f"Starting experiment: {dataset_name} - {config_name} - seed {seed}")
                 experiment_start_time = time.time()

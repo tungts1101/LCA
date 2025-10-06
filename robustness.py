@@ -294,79 +294,6 @@ def eval_cifar100p(model, cifar_p_dir, batch_size=256, device="cuda",
             print(f"\n[C-P] mFR (EXTRA, mean over {len(mfrs_ex)}): {np.mean(mfrs_ex):.4f}")
             print(f"[C-P] Mean frame-acc (EXTRA): {np.mean(accs_ex)*100:.2f}%")
 
-# =====================================================================================
-# AutoAttack evaluation (L_inf and L2)
-# =====================================================================================
-def eval_autoattack(model, batch_size=128, device="cuda",
-                    data_root="/home/lis/data", label_mapper: np.ndarray = None,
-                    norm="Linf", eps=None, version="standard"):
-    """
-    Evaluate adversarial robustness with AutoAttack.
-    Args:
-        model: your trained model
-        batch_size: eval batch size
-        device: "cuda" or "cpu"
-        data_root: CIFAR-100 root dir
-        label_mapper: mapping from orig CIFAR labels -> model labels
-        norm: "Linf" or "L2"
-        eps: perturbation budget
-        version: AutoAttack version, usually "standard"
-    """
-
-    try:
-        from autoattack import AutoAttack
-    except ImportError:
-        raise ImportError("Please install autoattack first: pip install git+https://github.com/fra31/auto-attack")
-
-    # --- Dataset (clean CIFAR-100 test, remapped, same transforms as training) ---
-    base = datasets.CIFAR100(root=data_root, train=False, download=True)
-    tf = transforms.Compose([
-        transforms.ToPILImage(),
-        transforms.Resize(224, interpolation=transforms.InterpolationMode.BICUBIC),
-        transforms.CenterCrop(224),
-        transforms.ToTensor(),
-    ])
-
-    class Wrap(Dataset):
-        def __init__(self, base, tf, mapper):
-            self.data, self.targets = base.data, base.targets
-            self.tf, self.mapper = tf, mapper
-        def __len__(self): return len(self.targets)
-        def __getitem__(self, i):
-            x = self.tf(self.data[i])
-            y_orig = int(self.targets[i])
-            y = int(self.mapper[y_orig]) if self.mapper is not None else y_orig
-            return x, y
-
-    test_ds = Wrap(base, tf, label_mapper)
-    test_loader = DataLoader(test_ds, batch_size=batch_size, shuffle=False,
-                             num_workers=4, pin_memory=True)
-
-    # --- Stack all test data (AutoAttack expects tensors) ---
-    xs, ys = [], []
-    for x, y in test_loader:
-        xs.append(x)
-        ys.append(y)
-    x_test = torch.cat(xs, dim=0).to(device)
-    y_test = torch.cat(ys, dim=0).to(device)
-
-    # --- Default eps values if not set ---
-    if eps is None:
-        if norm == "Linf":
-            eps = 8/255  # standard for CIFAR
-        elif norm == "L2":
-            eps = 3.0
-        else:
-            raise ValueError(f"Unknown norm {norm}")
-
-    # --- Run AutoAttack ---
-    adversary = AutoAttack(model, norm=norm, eps=eps, version=version)
-    print(f"\n=== Running AutoAttack ({norm}, eps={eps}) ===")
-    adv_acc = adversary.run_standard_evaluation(x_test, y_test, bs=batch_size)
-
-    print(f"AutoAttack {norm} @ eps={eps}: accuracy = {adv_acc:.2f}%")
-    return adv_acc
-
 
 # =====================================================================================
 # Wiring it all together (example main)
@@ -394,7 +321,7 @@ if __name__ == "__main__":
         "model_lora_target_modules": ["qkv"],
         "model_classifier": ["mlp"],
         "train_merge": "ties",
-        "train_checkpoint_postfix": "simple_cil",
+        "train_checkpoint_postfix": "base_lca",
     }
 
     # DataManager (for class order)
@@ -427,10 +354,10 @@ if __name__ == "__main__":
     eval_cifar100_clean(model, batch_size=256, num_workers=4, device="cuda",
                         data_root="/home/lis/data", label_mapper=label_mapper)
 
-    # CIFAR-100-C @224 (no norm, remapped)  -- optional
-    cifar_c_dir = "/home/lis/data/CIFAR-100-C"
-    eval_cifar100c(model, cifar_c_dir, batch_size=256, num_workers=4,
-                   severities=(1,2,3,4,5), device="cuda", label_mapper=label_mapper)
+    # # CIFAR-100-C @224 (no norm, remapped)  -- optional
+    # cifar_c_dir = "/home/lis/data/CIFAR-100-C"
+    # eval_cifar100c(model, cifar_c_dir, batch_size=256, num_workers=4,
+    #                severities=(1,2,3,4,5), device="cuda", label_mapper=label_mapper)
 
     # CIFAR-100-P @224 (no norm, remapped): official only
     cifar_p_dir = "/home/lis/data/CIFAR-100-P/CIFAR-100-P"

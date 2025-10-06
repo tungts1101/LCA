@@ -183,7 +183,7 @@ def get_backbone(args):
             model.out_dim = 768
         
         for name, param in model.named_parameters():
-            if "ssf_scale" not in name and "ssf_shift_" not in name: 
+            if "ssf_" not in name and "ssf_" not in name: 
                 param.requires_grad = False
         return model.eval()
     elif '_vpt' in name:
@@ -235,10 +235,11 @@ def get_backbone(args):
             model.out_dim=768
         else:
             raise NotImplementedError("Unknown type {}".format(name))
-        
         for param_name, param in model.named_parameters():
-            if "adapter" not in param_name.lower():
+            if "adapt" not in param_name.lower():
                 param.requires_grad = False
+            # else:
+            #     print(f"Trainable params: {param_name}")
         return model.eval()
     else:
         raise NotImplementedError("Unknown type {}".format(name))
@@ -360,6 +361,11 @@ class Model(nn.Module):
         trainable_params = count_parameters(self, trainable=True)
         total_params = count_parameters(self)
         return f"Model(trainable_params={trainable_params:,}, total_params={total_params:,}, percentage={trainable_params * 100 / total_params:.2f})"
+
+    def get_backbone_info(self):
+        trainable_params = count_parameters(self.backbone, trainable=True)
+        total_params = count_parameters(self.backbone)
+        return f"Backbone(trainable_params={trainable_params:,}, total_params={total_params:,}, percentage={trainable_params * 100 / total_params:.2f})"
 
 
 # =============================================================================

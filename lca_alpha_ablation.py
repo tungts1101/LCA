@@ -719,10 +719,10 @@ class Learner:
 DATA_TABLE = {
     # "cifar224": [(10, 10, 10)],
     # "imagenetr": [(10, 20, 20)],
-    # "imageneta": [(10, 20, 20)],
+    "imageneta": [(10, 20, 20)],
     # "cub": [(10, 20, 20)],
     # "omnibenchmark": [(10, 30, 30)],
-    "vtab": [(5, 10, 10)],
+    # "vtab": [(5, 10, 10)],
     # "cars": [(10, 16, 20)]
 }
 
@@ -918,8 +918,15 @@ def run_experiments():
         #     "train_ca_entropy_weight": 0.1,
         #     "train_ca_logit_norm": 0.1,
         # },
-        "backbone_ablation_cil": {
-            "train_ca": False,
+        "alpha_ablation": {
+            "train_ca": True,
+            "train_ca_epochs": 10,
+            "train_ca_lr": 1e-2,
+            "train_ca_samples_per_cls": 512,
+            "train_ca_batch_size": 128,
+            # "robust_weight_log": 10**1.5,
+            "train_ca_entropy_weight": 0.0,
+            "train_ca_logit_norm": None
         }
     }
     
@@ -932,7 +939,7 @@ def run_experiments():
         dataset_results = {}
         
         for seed in seeds:
-            logfilename = os.path.join(LOG_DIR, f"backbone_ablation_cil_{dataset_name}.log")
+            logfilename = os.path.join(LOG_DIR, f"alpha_ablation_{dataset_name}.log")
             for handler in logging.root.handlers[:]:
                 logging.root.removeHandler(handler)
             logging.basicConfig(
@@ -946,31 +953,62 @@ def run_experiments():
             )
 
             for config_name, config in experiment_configs.items():
+                alpha_config = config.copy()
+
                 logging.info("=" * 80)
                 logging.info(f"Starting experiment: {dataset_name} - {config_name} - seed {seed}")
-
-                config['vpt_type'] = 'deep'
-                config['prompt_token_num'] = 64
-                config['ffn_num'] = 64
-
-                for backbone in [
-                    "pretrained_vit_b16_224_ssf",
-                    "pretrained_vit_b16_224_in21k_ssf",
-                    "pretrained_vit_b16_224_vpt",
-                    "pretrained_vit_b16_224_in21k_vpt",
-                    "pretrained_vit_b16_224_adapter",
-                    "pretrained_vit_b16_224_in21k_adapter",
-                    "vit_base_patch16_224_lora", 
-                    "vit_base_patch16_224_in21k_lora",
-                ]:
-                    config["model_backbone"] = backbone
-                    logging.info(f"Using backbone: {backbone}")
-
+                for alpha_exp in [100.0]:
+                    alpha_config["train_ca_robust_weight"] = alpha_exp
                     experiment_start_time = time.time()
-                    result = run_single_experiment(dataset_name, config_name, config, seed)
+                    result = run_single_experiment(dataset_name, config_name, alpha_config, seed)
                     experiment_end_time = time.time()
-                    logging.info(f"Experiment {dataset_name}_{config_name}_seed{seed} time: {experiment_end_time - experiment_start_time:.2f} seconds")
+                    logging.info(f"Experiment alpha={alpha_exp}: {experiment_end_time - experiment_start_time:.2f} seconds")
+                    
+                    # # Store result with seed information
+                    # if config_name not in dataset_results:
+                    #     dataset_results[config_name] = {
+                    #         'seeds': [],
+                    #         'mlp_faa': [],
+                    #         'mlp_asa': [],
+                    #         'nme_faa': [],
+                    #         'nme_asa': []
+                    #     }
                 
+                # dataset_results[config_name]['seeds'].append(seed)
+                # dataset_results[config_name]['mlp_faa'].append(result.get('mlp_faa', 0.0))
+                # dataset_results[config_name]['mlp_asa'].append(result.get('mlp_asa', 0.0))
+                # dataset_results[config_name]['nme_faa'].append(result.get('nme_faa', 0.0))
+                # dataset_results[config_name]['nme_asa'].append(result.get('nme_asa', 0.0))
+        
+        # # Summarize results for this dataset
+        # logging.info("\n" + "="*80)
+        # logging.info(f"SUMMARY FOR {dataset_name.upper()} DATASET")
+        # logging.info("="*80)
+        
+        # for config_name, results in dataset_results.items():
+        #     if len(results['mlp_asa']) > 0:
+        #         mlp_asa_mean = np.mean(results['mlp_asa'])
+        #         mlp_asa_std = np.std(results['mlp_asa'])
+        #         mlp_faa_mean = np.mean(results['mlp_faa'])
+        #         mlp_faa_std = np.std(results['mlp_faa'])
+                
+        #         logging.info(f"\n{config_name.upper()}:")
+        #         config = experiment_configs.get(config_name, {})
+        #         logging.info(f"  Configuration: {config}")
+        #         logging.info(f"  Seeds: {results['seeds']}")
+        #         logging.info(f"  MLP - ASA: {mlp_asa_mean:.2f} ± {mlp_asa_std:.2f}")
+        #         logging.info(f"  MLP - FAA: {mlp_faa_mean:.2f} ± {mlp_faa_std:.2f}")
+                
+        #         nme_asa_mean = np.mean(results['nme_asa'])
+        #         nme_asa_std = np.std(results['nme_asa'])
+        #         nme_faa_mean = np.mean(results['nme_faa'])
+        #         nme_faa_std = np.std(results['nme_faa'])
+                
+        #         logging.info(f"  NME - ASA: {nme_asa_mean:.2f} ± {nme_asa_std:.2f}")
+        #         logging.info(f"  NME - FAA: {nme_faa_mean:.2f} ± {nme_faa_std:.2f}")
+        
+        # logging.info(f"\nCompleted all experiments for {dataset_name}")
+        # logging.info("="*80)
 
 if __name__ == "__main__":
     start_time = time.time()
