@@ -2,7 +2,7 @@ import torch
 from torch import nn
 import torch.nn.functional as F
 import timm
-from timm.models.layers.weight_init import trunc_normal_
+from timm.models.layers import trunc_normal_
 from peft import get_peft_model, LoraConfig
 import numpy as np
 import logging
@@ -95,7 +95,7 @@ def merge_task_vectors(trimmed_task_vectors):
 
 def merge(base_params, tasks_params, method="ties", lamb=1.0, topk=100):
     params = {}
-    for name in base_params:
+    for name in tasks_params[0]:
         base_tv = base_params[name].clone()
         task_vectors = [task_params[name] for task_params in tasks_params]
 
@@ -318,7 +318,7 @@ class Model(nn.Module):
         super().__init__()
         self._config = config
         self.backbone = get_backbone(config)
-        self.norm = nn.LayerNorm(self.backbone.num_features)
+        self.norm = None if not config.get("model_use_norm", False) else nn.LayerNorm(self.backbone.num_features)
         self.classifier = None
 
     @property
