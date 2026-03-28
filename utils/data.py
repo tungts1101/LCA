@@ -14,7 +14,7 @@ from utils.toolkit import split_images_labels
 #        year = {2023}
 #    }
 
-DATA_ROOT = "/dev/sdb1/tung"
+DATA_ROOT = "/mnt/data_drive/tung"
 os.makedirs(DATA_ROOT, exist_ok=True)
 
 def download_and_extract_dataset(dataset_name, file_id, train_subdir="train", test_subdir="test"):
