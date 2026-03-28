@@ -1,6 +1,7 @@
 import torch
 from torch import nn
 import torch.nn.functional as F
+from torch.utils.checkpoint import checkpoint as grad_ckpt
 import timm
 from timm.models.layers import trunc_normal_
 from peft import get_peft_model, LoraConfig
@@ -120,12 +121,17 @@ def merge(base_params, tasks_params, method="ties", lamb=1.0, topk=100):
 
 
 def set_random(seed):
+    import os, random, torch, numpy as np
+
+    os.environ["CUBLAS_WORKSPACE_CONFIG"] = ":4096:8"
+
     torch.manual_seed(seed)
     torch.cuda.manual_seed_all(seed)
     np.random.seed(seed)
     random.seed(seed)
     torch.backends.cudnn.deterministic = True
     torch.backends.cudnn.benchmark = False
+    torch.use_deterministic_algorithms(True)
 
 
 def accuracy(y_pred, y_true, class_increments):
@@ -144,6 +150,11 @@ def accuracy(y_pred, y_true, class_increments):
     return acc_total, all_acc
 
 
+def seed_worker(worker_id):
+    worker_seed = torch.initial_seed() % 2**32
+    np.random.seed(worker_seed)
+    random.seed(worker_seed)
+    
 # =============================================================================
 
 
@@ -162,7 +173,8 @@ def get_backbone(args):
     elif "lora" in name:
         model = timm.create_model(name[:-5], pretrained=True, num_classes=0)
         model.requires_grad_(False)
-        model.out_dim = 768
+        outdim = args.get("model_outdim", 768)
+        model.out_dim = outdim
         lora_config = LoraConfig(
             r=args["model_lora_r"],
             lora_alpha=args["model_lora_alpha"],
@@ -250,25 +262,53 @@ def get_backbone(args):
 
 # Classifier ==================================================================
 class ContinualLinear(nn.Module):
-    def __init__(self, embed_dim, nb_classes, with_norm=False, with_bias=False):
+    def __init__(self, embed_dim, nb_classes, with_norm=False, with_bias=False, norm_layer=None):
         super().__init__()
 
         self.embed_dim = embed_dim
         self.with_norm = with_norm
         self.with_bias = with_bias
+        self.norm_layer = norm_layer
+
+        if with_norm and norm_layer is None:
+            self.norm_layer = "ln"
 
         self.heads = nn.ModuleList([])
         self.update(nb_classes)
 
     def create_head(self, nb_classes):
+        # single_head = []
+        # if self.with_norm:
+        #     single_head.append(nn.LayerNorm(self.embed_dim))
+        # fc = nn.Linear(self.embed_dim, self.embed_dim * 2, bias=self.with_bias)
+        # trunc_normal_(fc.weight, std=0.02)
+        # if self.with_bias:
+        #     nn.init.constant_(fc.bias, 0)
+        # single_head.append(fc)
+
+        # # combine layers
+        # single_head.append(nn.GELU())
+        # fc2 = nn.Linear(self.embed_dim * 2, nb_classes, bias=self.with_bias)
+        # trunc_normal_(fc2.weight, std=0.02)
+        # if self.with_bias:
+        #     nn.init.constant_(fc2.bias, 0)
+        # single_head.append(fc2)
+
+        # head = nn.Sequential(*single_head)
+        # return head
+
         single_head = []
         if self.with_norm:
-            single_head.append(nn.LayerNorm(self.embed_dim))
+            if self.norm_layer == "bn":
+                single_head.append(nn.BatchNorm1d(self.embed_dim))
+            elif self.norm_layer == "ln":
+                single_head.append(nn.LayerNorm(self.embed_dim))
         fc = nn.Linear(self.embed_dim, nb_classes, bias=self.with_bias)
         trunc_normal_(fc.weight, std=0.02)
         if self.with_bias:
             nn.init.constant_(fc.bias, 0)
         single_head.append(fc)
+
         head = nn.Sequential(*single_head)
         return head
 
@@ -325,10 +365,10 @@ class Model(nn.Module):
     def feature_dim(self):
         return self.backbone.num_features
 
-    def update_classifier(self, num_classes, freeze_old=True):
+    def update_classifier(self, num_classes, with_norm=False, with_bias=False, freeze_old=True, norm_layer=None):
         if self.classifier == None:
             self.classifier = ContinualLinear(
-                self.feature_dim, num_classes, with_norm=False, with_bias=False
+                self.feature_dim, num_classes, with_norm=with_norm, with_bias=with_bias, norm_layer=norm_layer
             )
         else:
             self.classifier.update(num_classes, freeze_old=freeze_old)
@@ -346,8 +386,61 @@ class Model(nn.Module):
 
         return params
 
-    def get_features(self, x):
+    def get_features(self, x, return_layer_features=False):
+        self.layer_features = []
+
+        if return_layer_features:
+            hooks = []
+            # timm ViT: blocks; HuggingFace ViT: encoder.layer
+            blocks = getattr(self.backbone, "blocks", None)
+            if blocks is None:
+                blocks = getattr(getattr(self.backbone, "encoder", None), "layer", None)
+
+            if blocks is not None:
+                def _make_hook():
+                    def _hook(module, input, output):
+                        feat = output[0] if isinstance(output, tuple) else output
+                        self.layer_features.append(feat)
+                    return _hook
+
+                for block in blocks:
+                    hooks.append(block.register_forward_hook(_make_hook()))
+
         z = self.backbone(x)
+
+        if return_layer_features:
+            for hook in hooks:
+                hook.remove()
+
+        if self.norm is not None:
+            z = self.norm(z)
+        return z
+
+    def forward_from_block(self, feats, start_block):
+        """Run backbone from `start_block` onwards.
+
+        Args:
+            feats:       (B, seq_len, D) full token sequence, or (B, D) CLS-only
+            start_block: int, first block index to execute (0-indexed)
+        Returns:
+            (B, D) final CLS features after norm
+        """
+        blocks = getattr(self.backbone, "blocks", None)
+        if blocks is None:
+            raise RuntimeError("backbone.blocks not found; only timm ViT is supported")
+
+        if feats.dim() == 2:
+            # CLS-only path: pad with one dummy patch token to keep attention valid
+            B, D = feats.shape
+            dummy_patch = torch.zeros(B, 1, D, device=feats.device, dtype=feats.dtype)
+            z = torch.cat([feats.unsqueeze(1), dummy_patch], dim=1)  # (B, 2, D)
+        else:
+            z = feats  # (B, seq_len, D) — full token sequence passed as-is
+
+        for i in range(start_block, len(blocks)):
+            z = grad_ckpt(blocks[i], z, use_reentrant=False)
+
+        z = self.backbone.norm(z)[:, 0]  # CLS token after backbone norm
         if self.norm is not None:
             z = self.norm(z)
         return z
