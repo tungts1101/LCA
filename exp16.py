@@ -471,8 +471,8 @@ class Learner:
         
         train_reg_weight = self._config.get("train_reg_weight", 0.2)
         train_feature_at_layer = self._config.get("train_feature_at_layer", [-1])
-        train_reg_samples = self._config.get("train_reg_samples", 256)
-        train_reg_batch_size = self._config.get("train_reg_batch_size", 16)
+        train_reg_samples = self._config.get("train_reg_samples", 8)
+        train_reg_batch_size = self._config.get("train_reg_batch_size", 64)
         use_reg = train_reg_weight > 0 and self._cur_task > 0 and hasattr(self, "_layer_class_means")
 
         reg_samples_cpu = {}
