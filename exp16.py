@@ -1,4 +1,5 @@
 from typing import Dict, List
+from tqdm import tqdm
 import torch
 from torch import optim
 import torch.nn.functional as F
@@ -497,7 +498,7 @@ class Learner:
         for epoch in range(epochs):
             total_loss, total_reg_loss, total_acc, total = 0, 0, 0, 0
 
-            for _, (_, _, x, y) in enumerate(train_loader):
+            for _, (_, _, x, y) in tqdm(enumerate(train_loader), total=len(train_loader), desc=f"Epoch {epoch+1}/{epochs}", leave=False):
                 x, y = x.cuda(), y.cuda()
                 y = torch.where(
                     y - self._known_classes >= 0,
@@ -513,19 +514,11 @@ class Learner:
                     reg_loss = torch.tensor(0.0, device="cuda")
                     for l in train_feature_at_layer:
                         samples, target = reg_samples_cpu[l]
-                        layer_reg_loss = torch.tensor(0.0, device="cuda")
-                        n_chunks = math.ceil(samples.shape[0] / train_reg_batch_size)
-                        for chunk_idx, chunk_start in enumerate(range(0, samples.shape[0], train_reg_batch_size)):
-                            chunk        = samples[chunk_start: chunk_start + train_reg_batch_size].cuda(non_blocking=True)
-                            chunk_target = target[chunk_start: chunk_start + train_reg_batch_size].cuda(non_blocking=True)
-                            proj = self.model.forward_from_block(chunk, l + 1)
-                            chunk_loss = F.mse_loss(proj, chunk_target)
-                            layer_reg_loss = layer_reg_loss + chunk_loss
-                            logging.debug(
-                                f"[Reg] layer={l} chunk={chunk_idx+1}/{n_chunks} "
-                                f"loss={chunk_loss.item():.4f}"
-                            )
-                        reg_loss = reg_loss + layer_reg_loss / n_chunks
+                        idx = torch.randint(0, samples.shape[0], (train_reg_batch_size,))
+                        chunk        = samples[idx].cuda(non_blocking=True)
+                        chunk_target = target[idx].cuda(non_blocking=True)
+                        proj = self.model.forward_from_block(chunk, l + 1)
+                        reg_loss = reg_loss + F.mse_loss(proj, chunk_target)
 
                     loss = loss + train_reg_weight * reg_loss / len(train_feature_at_layer)
                     total_reg_loss += reg_loss.item() * len(y)
