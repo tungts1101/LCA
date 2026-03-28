@@ -510,17 +510,22 @@ class Learner:
                 loss = F.cross_entropy(logits, y, ignore_index=-100)
 
                 if use_reg:
-                    # 
                     reg_loss = torch.tensor(0.0, device="cuda")
                     for l in train_feature_at_layer:
                         samples, target = reg_samples_cpu[l]
                         layer_reg_loss = torch.tensor(0.0, device="cuda")
-                        for chunk_start in range(0, samples.shape[0], train_reg_batch_size):
+                        n_chunks = math.ceil(samples.shape[0] / train_reg_batch_size)
+                        for chunk_idx, chunk_start in enumerate(range(0, samples.shape[0], train_reg_batch_size)):
                             chunk        = samples[chunk_start: chunk_start + train_reg_batch_size].cuda(non_blocking=True)
                             chunk_target = target[chunk_start: chunk_start + train_reg_batch_size].cuda(non_blocking=True)
                             proj = self.model.forward_from_block(chunk, l + 1)
-                            layer_reg_loss = layer_reg_loss + F.mse_loss(proj, chunk_target)
-                        reg_loss = reg_loss + layer_reg_loss / math.ceil(samples.shape[0] / train_reg_batch_size)
+                            chunk_loss = F.mse_loss(proj, chunk_target)
+                            layer_reg_loss = layer_reg_loss + chunk_loss
+                            logging.debug(
+                                f"[Reg] layer={l} chunk={chunk_idx+1}/{n_chunks} "
+                                f"loss={chunk_loss.item():.4f}"
+                            )
+                        reg_loss = reg_loss + layer_reg_loss / n_chunks
 
                     loss = loss + train_reg_weight * reg_loss / len(train_feature_at_layer)
                     total_reg_loss += reg_loss.item() * len(y)
