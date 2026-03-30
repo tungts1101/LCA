@@ -469,7 +469,7 @@ class Learner:
             optimizer, T_max=epochs, eta_min=1e-6
         )
         
-        train_reg_weight = self._config.get("train_reg_weight", 0.2)
+        train_reg_weight = self._config.get("train_reg_weight", 0.1)
         train_feature_at_layer = self._config.get("train_feature_at_layer", [-1])
         train_reg_samples = self._config.get("train_reg_samples", 8)
         train_reg_batch_size = self._config.get("train_reg_batch_size", 64)
@@ -1035,7 +1035,7 @@ def run_single_experiment(dataset_name, config_name, experiment_config, seed):
     return result
 
 def run_experiments():
-    seeds = [1993]
+    seeds = [1993, 1994, 1995]
 
     experiment_configs = {
         "exp15": {
@@ -1055,7 +1055,7 @@ def run_experiments():
 
             "train_prefix": "exp16",
 
-            "train_feature_at_layer": [5],
+            "train_feature_at_layer": [8],
 
             "train_first_task_only": False,
             "train_incremental": False,
