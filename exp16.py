@@ -469,7 +469,7 @@ class Learner:
             optimizer, T_max=epochs, eta_min=1e-6
         )
         
-        train_reg_weight = self._config.get("train_reg_weight", 0.1)
+        train_reg_weight = self._config.get("train_reg_weight", 0.2)
         train_feature_at_layer = self._config.get("train_feature_at_layer", [-1])
         train_reg_samples = self._config.get("train_reg_samples", 8)
         train_reg_batch_size = self._config.get("train_reg_batch_size", 64)
@@ -1038,7 +1038,7 @@ def run_experiments():
     seeds = [1993, 1994, 1995]
 
     experiment_configs = {
-        "exp15": {
+        "exp16": {
             "reset_train": True,
             "reset_merge": True,
             "train_epochs": 10,
@@ -1072,7 +1072,7 @@ def run_experiments():
             "train_ca_samples_per_cls": 512,
             "train_ca_batch_size": 64,
             "train_ca_epochs": 3,
-            "train_ca_robust_weight": 0.0,
+            "train_ca_robust_weight": 1.0,
 
             # vit_base_patch16_224_lora
             # vit_base_patch16_224_21k_lora
