@@ -1055,7 +1055,7 @@ def run_experiments():
 
             "train_prefix": "exp16",
 
-            "train_feature_at_layer": [5],
+            "train_feature_at_layer": [8],
 
             "train_first_task_only": False,
             "train_incremental": False,
