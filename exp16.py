@@ -1067,7 +1067,7 @@ def run_experiments():
             "train_merge_incremental": False,
             "train_merge_rankwise_lamb": 0.85,
 
-            "train_ca": True,
+            "train_ca": False,
             "train_ca_load_checkpoint_from_first_task": False,
             "train_ca_samples_per_cls": 512,
             "train_ca_batch_size": 64,
