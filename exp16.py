@@ -18,7 +18,8 @@ from helper import (
     set_random,
     merge,
     count_parameters,
-    seed_worker
+    seed_worker,
+    IntermediateFeatureSampler,
 )
 from torch.distributions import MultivariateNormal
 import logging
@@ -31,96 +32,6 @@ import math
 from scipy.optimize import linear_sum_assignment
 
 
-def merge_tasks_rankwise(task1, task2, is_perm_one=True, lamb=1.0, scale=1.0):
-    def build_lora_AB_groups_from_keys(keys: List[str]) -> List[Dict[str, str]]:
-        keyset = set(keys)
-        groups = []
-        seen = set()
-
-        for k in keys:
-            if ".lora_A." in k:
-                b = k.replace(".lora_A.", ".lora_B.")
-                if b in keyset:
-                    if (k, b) not in seen:
-                        seen.add((k, b))
-                        groups.append({"A": k, "B": b})
-            elif "adaptmlp" in k:
-                if k not in seen:
-                    seen.add(k)
-                    groups.append({"A": k, "B": k})
-        return groups
-
-    @torch.no_grad()
-    def lora_rank_similarity(A1, B1, A2, B2):
-        B1n = F.normalize(B1, dim=0)
-        B2n = F.normalize(B2, dim=0)
-        A1n = F.normalize(A1, dim=1)
-        A2n = F.normalize(A2, dim=1)
-        return (B1n.T @ B2n) * (A1n @ A2n.T)
-
-    @torch.no_grad()
-    def align_lora_ranks_permute_A1B1(A1, B1, A2, B2):
-        S = lora_rank_similarity(A1, B1, A2, B2)
-        cost = (S.max() - S).cpu().numpy()
-        _, col = linear_sum_assignment(cost)
-        col = torch.tensor(col, device=A1.device)
-
-        # print(col)
-
-        if is_perm_one:
-            A1p = A1[col, :]
-            B1p = B1[:, col]
-
-            return A1p, B1p
-        else:
-            A2p = A2[col, :]
-            B2p = B2[:, col]
-
-            return A2p, B2p
-
-    @torch.no_grad()
-    def lora_rank_energy(A, B):
-        return torch.norm(B, dim=0) * torch.norm(A, dim=1)
-        # return torch.sum(torch.abs(B), dim=0) * torch.sum(torch.abs(A), dim=1)
-
-    merged = {}
-    keys = list(task1.keys())
-    ab_groups = build_lora_AB_groups_from_keys(keys)
-
-    for g in ab_groups:
-        A_key, B_key = g["A"], g["B"]
-
-        A1, B1 = task1[A_key], task1[B_key]
-        A2, B2 = task2[A_key], task2[B_key]
-
-        # # 1) Git Re-Basin: align ranks by permuting A1,B1
-        if is_perm_one:
-            A1p, B1p = align_lora_ranks_permute_A1B1(A1, B1, A2, B2)
-        else:
-            A2p, B2p = align_lora_ranks_permute_A1B1(A1, B1, A2, B2)
-
-        # # 2) Rank-wise structured merge (past-favoring)
-        if is_perm_one:
-            e1 = lora_rank_energy(A1p, B1p)
-            e2 = lora_rank_energy(A2, B2)
-        else:
-            e1 = lora_rank_energy(A1, B1)
-            e2 = lora_rank_energy(A2p, B2p)
-
-        # print(torch.min(e1), torch.max(e1), torch.min(e2), torch.max(e2))
-        keep1 = e1 >= lamb * e2
-
-        if is_perm_one:
-            A = torch.where(keep1[:, None], A1p, A2)
-            B = torch.where(keep1[None, :], B1p, B2)
-        else:
-            A = torch.where(keep1[:, None], A1, A2p)
-            B = torch.where(keep1[None, :], B1, B2p)
-
-        merged[A_key] = A * scale
-        merged[B_key] = B * scale
-
-    return merged
 
 CHECKPOINT_DIR = "checkpoints"
 os.makedirs(CHECKPOINT_DIR, exist_ok=True)
@@ -130,6 +41,8 @@ os.makedirs(LOG_DIR, exist_ok=True)
 
 g = torch.Generator()
 g.manual_seed(0)
+
+
 
 class Learner:
     def __init__(self, config):
@@ -159,13 +72,8 @@ class Learner:
         self.W_rand = None
 
         # assert config
-        train_first_task_only = self._config.get("train_first_task_only", False)
-        train_merge = self._config.get("train_merge", "none")
         classifiers = self._config.get("model_classifier", ["mlp"])
         train_ca = self._config.get("train_ca", False)
-
-        if train_first_task_only and train_merge != "none":
-            raise ValueError("train_merge must be 'none' when train_first_task_only is True")
         
         if "mlp" not in classifiers and train_ca:
             raise ValueError("train_ca requires 'mlp' classifier")
@@ -182,11 +90,21 @@ class Learner:
         if train_RP:
             self.setup_RP()
 
+        stop_at_task = self._config.get("train_stop_at_task", None)
+        if stop_at_task == -1:
+            stop_at_task = None
         for task in range(num_tasks):
             self.before_task(task, data_manager)
             self.train()
             self.eval()
             self.after_task()
+            if stop_at_task is not None and task >= stop_at_task:
+                break
+        
+        torch.save(
+            self.model.state_dict(),
+            self.model_checkpoint()
+        )
 
     def before_task(self, task, data_manager):
         task_size = data_manager.get_task_size(task)
@@ -196,6 +114,13 @@ class Learner:
 
         for clz in range(self._known_classes, self._total_classes):
             self._cls_to_task_idx[clz] = self._cur_task
+
+        if task > 0:
+            merged = self.merged_checkpoint(task - 1)
+            if os.path.exists(merged):
+                model_use_norm = self._config.get("model_use_norm", False)
+                logging.info(f"[Before Task {task}] Loading merged checkpoint from task {task - 1}")
+                self.load_backbone(torch.load(merged), load_norm=model_use_norm)
 
     def after_task(self):
         self._known_classes = self._total_classes
@@ -324,15 +249,18 @@ class Learner:
         )
 
         classifiers = self._config.get("model_classifier", ["mlp"])
-        train_first_task_only = self._config.get("train_first_task_only", False)
-        if self._cur_task == 0 or not train_first_task_only:
-            self.train_mlp(train_loader)
+        self.train_mlp(train_loader)
         
         train_merge = self._config.get("train_merge", "none")
         if train_merge != "none":
             self.merge()
         
-        self.extract_prototypes()
+        if self._config.get("train_reg_weight", 0.2) > 0:
+            self.extract_prototypes()
+
+        # train_merge = self._config.get("train_merge", "none")
+        # if train_merge != "none":
+        #     self.merge()
         
         train_ca = self._config.get("train_ca", False)
         if train_ca:
@@ -344,28 +272,17 @@ class Learner:
             self.train_prototype(prototype_loader)
     
     def extract_prototypes(self):
-        train_feature_at_layer = self._config.get("train_feature_at_layer", [-1])
-        all_keys = train_feature_at_layer + ["final"]
-        feature_dim = self.model.feature_dim
-        total_class = self._total_classes
-        token_length = 197
+        logging.info(f"[Training] Extracting intermediate features for task {self._cur_task}")
+        L = self._config.get("train_feature_at_layer", -1)
 
-        # Initialize or extend storage for intermediate layers + final layer
-        if not hasattr(self, "_layer_class_means"):
-            self._layer_class_means = {k: torch.zeros(total_class, token_length, feature_dim) for k in all_keys}
-            self._layer_class_stds  = {k: torch.zeros(total_class, token_length, feature_dim) for k in all_keys}
+        if not hasattr(self, "_sampler"):
+            self._sampler = IntermediateFeatureSampler(
+                total_classes=self._total_classes,
+                token_length=197,
+                feature_dim=self.model.feature_dim,
+            )
         else:
-            for k in all_keys:
-                if k not in self._layer_class_means:
-                    self._layer_class_means[k] = torch.zeros(total_class, token_length, feature_dim)
-                    self._layer_class_stds[k]  = torch.zeros(total_class, token_length, feature_dim)
-                else:
-                    new_means = torch.zeros(total_class, token_length, feature_dim)
-                    new_means[:self._known_classes] = self._layer_class_means[k]
-                    self._layer_class_means[k] = new_means
-                    new_stds = torch.zeros(total_class, token_length, feature_dim)
-                    new_stds[:self._known_classes] = self._layer_class_stds[k]
-                    self._layer_class_stds[k] = new_stds
+            self._sampler.expand_to(self._total_classes)
 
         for cls_idx in range(self._known_classes, self._total_classes):
             train_set = self.data_manager.get_dataset(
@@ -376,63 +293,38 @@ class Learner:
                 num_workers=4, worker_init_fn=seed_worker, generator=g
             )
 
-            layer_feats = {k: [] for k in all_keys}
+            layer_feats = {L: [], "final": []}
 
             self.model.eval()
             with torch.no_grad():
                 for _, (_, _, x, y) in enumerate(train_loader):
                     x = x.cuda()
                     z = self.model.get_features(x, return_layer_features=True)  # (B, D)
-
-                    for l in train_feature_at_layer:
-                        layer_feats[l].append(self.model.layer_features[l].cpu())
-
+                    layer_feats[L].append(self.model.layer_features[L].cpu())
                     layer_feats["final"].append(z.cpu())
 
-            for k in all_keys:
+            for k in (L, "final"):
                 feats = torch.cat(layer_feats[k], dim=0)
-                self._layer_class_means[k][cls_idx] = feats.mean(dim=0)
-                self._layer_class_stds[k][cls_idx] = feats.std(dim=0, unbiased=True)
+                self._sampler.update(feats, cls_idx, k)
 
         # Release last batch's intermediate tensors captured by hooks
         self.model.layer_features = []
         torch.cuda.empty_cache()
 
-
     def train_mlp(self, train_loader):
         logging.info(f"[Training] Task {self._cur_task}")
 
+        model_use_norm = self._config.get("model_use_norm", False)
+        model_classifier_use_norm = not model_use_norm
+        model_classifier_norm_layer = self._config.get("model_classifier_norm_layer", "ln")
+
         self.model.update_classifier(
             self._total_classes - self._known_classes, 
-            with_norm=True, with_bias=False, freeze_old=True, norm_layer="ln"
+            with_norm=model_classifier_use_norm, 
+            with_bias=False, freeze_old=True, 
+            norm_layer=model_classifier_norm_layer
         )
         self.model.cuda()
-
-        reset_train = self._config.get("reset_train", False)
-        if not reset_train:
-            saved_backbone_checkpoint = self.backbone_checkpoint(self._cur_task)
-            if os.path.exists(saved_backbone_checkpoint):
-                logging.info(f"[Training] Load backbone checkpoint for task {self._cur_task}")
-                backbone_params = torch.load(saved_backbone_checkpoint)
-                self.load_backbone(backbone_params)
-
-                saved_mlp_checkpoint = self.mlp_checkpoint(self._cur_task)
-                if os.path.exists(saved_mlp_checkpoint):
-                    logging.info(f"[Training] Load mlp checkpoint for task {self._cur_task}")
-                    self.model.classifier.heads[self._cur_task].load_state_dict(
-                        torch.load(saved_mlp_checkpoint), strict=True
-                    )
-
-                return
-
-        train_first_task_only = self._config.get("train_first_task_only", False)
-        if not train_first_task_only:
-            train_checkpoint_from = -1
-            train_incremental = self._config.get("train_incremental", False)
-            if train_incremental:
-                train_checkpoint_from = self._cur_task - 1
-            logging.info(f"[Training] Start from checkpoint {train_checkpoint_from}")
-            self.load_backbone(torch.load(self.backbone_checkpoint(train_checkpoint_from)), load_norm=False)
 
         self.model.train()
         logging.info(f"[Training] {self.model}")
@@ -469,58 +361,132 @@ class Learner:
             optimizer, T_max=epochs, eta_min=1e-6
         )
         
-        train_reg_weight = self._config.get("train_reg_weight", 0.2)
-        train_feature_at_layer = self._config.get("train_feature_at_layer", [-1])
-        train_reg_samples = self._config.get("train_reg_samples", 8)
-        train_reg_batch_size = self._config.get("train_reg_batch_size", 64)
-        use_reg = train_reg_weight > 0 and self._cur_task > 0 and hasattr(self, "_layer_class_means")
+        lam = self._config.get("train_reg_weight", 0.2)
+        lam2 = self._config.get("train_reg_weight_intra_class", 0.0)
+        L = self._config.get("train_feature_at_layer", -1)
+        K = self._config.get("train_reg_num_sampling", 4)
+        N = self._config.get("train_reg_num_classes", 5)
+        train_reg_loss = self._config.get("train_reg_loss", "mse")
+        train_reg_mag_weight = self._config.get("train_reg_mag_weight", 0.1)
+        use_reg = lam > 0 and self._cur_task > 0 and hasattr(self, "_sampler")
 
-        reg_samples_cpu = {}
-        if use_reg:
-            n_old = self._known_classes
-            for l in train_feature_at_layer:
-                layer_samples, layer_targets = [], []
-                for clz in range(n_old):
-                    clz_mean = self._layer_class_means[l][clz]    # (197, D)
-                    clz_std  = self._layer_class_stds[l][clz]     # (197, D)
-                    clz_samples = clz_mean.unsqueeze(0) + \
-                        torch.randn(train_reg_samples, *clz_mean.shape) * clz_std.unsqueeze(0)  # (N, 197, D)
-                    layer_samples.append(clz_samples)
-                    clz_target = self._layer_class_means["final"][clz][0]  # (D,) — CLS token
-                    layer_targets.append(clz_target.unsqueeze(0).expand(train_reg_samples, -1).clone())
-                all_samples = torch.cat(layer_samples, dim=0)   # (n_old*N, 197, D)
-                all_targets = torch.cat(layer_targets, dim=0)   # (n_old*N, D)
-                perm = torch.randperm(all_samples.shape[0])
-                all_samples = all_samples[perm]
-                all_targets = all_targets[perm]
-                reg_samples_cpu[l] = (all_samples.cpu().pin_memory(), all_targets.cpu().pin_memory())
+
+        train_minibatch_uniform = self._config.get("train_minibatch_uniform", False)
+        train_minibatch_num_cls = self._config.get("train_minibatch_num_cls", 2)
+
+        if train_minibatch_uniform:
+            num_new_cls = self._total_classes - self._known_classes
+            n_cls_per_batch = min(train_minibatch_num_cls, num_new_cls)
+            samples_per_cls_in_batch = max(1, self._config["train_batch_size"] // n_cls_per_batch)
+
+            all_x_list, all_y_list = [], []
+            for _, (_, _, xb, yb) in enumerate(train_loader):
+                all_x_list.append(xb)
+                all_y_list.append(yb)
+            all_x_cpu = torch.cat(all_x_list, dim=0)
+            all_y_cpu = torch.cat(all_y_list, dim=0)
+
+            cls_data_mlp = []
+            for c in range(num_new_cls):
+                mask = all_y_cpu == (c + self._known_classes)
+                cls_data_mlp.append(all_x_cpu[mask])
+
+            total_n_mlp = sum(len(d) for d in cls_data_mlp)
+            num_batches_mlp = max(1, total_n_mlp // self._config["train_batch_size"])
+
+        train_reg_at_each_n_batch = self._config.get("train_reg_at_each_n_batch", 1)
 
         for epoch in range(epochs):
-            total_loss, total_reg_loss, total_acc, total = 0, 0, 0, 0
+            total_loss, total_ce_loss, total_reg_loss, total_intra_loss, total_acc, total = 0, 0, 0, 0, 0, 0
 
-            for _, (_, _, x, y) in tqdm(enumerate(train_loader), total=len(train_loader), desc=f"Epoch {epoch+1}/{epochs}", leave=False):
+            if train_minibatch_uniform:
+                cls_shuffled_mlp = [d[torch.randperm(len(d))] for d in cls_data_mlp]
+                sample_ptrs_mlp = [0] * num_new_cls
+                cls_order_mlp = torch.randperm(num_new_cls).tolist()
+
+                def _mlp_batch_iter():
+                    classes_seen = set()
+                    for bi in range(num_batches_mlp):
+                        cls_start = (bi * n_cls_per_batch) % num_new_cls
+                        selected = [cls_order_mlp[(cls_start + j) % num_new_cls] for j in range(n_cls_per_batch)]
+                        xs, ys = [], []
+                        for c in selected:
+                            sz = len(cls_shuffled_mlp[c])
+                            p = sample_ptrs_mlp[c]
+                            idxs = torch.arange(p, p + samples_per_cls_in_batch) % sz
+                            chunk = cls_shuffled_mlp[c][idxs]
+                            sample_ptrs_mlp[c] = (p + samples_per_cls_in_batch) % sz
+                            xs.append(chunk)
+                            ys.append(torch.full((samples_per_cls_in_batch,), c, dtype=torch.long))
+                        classes_seen.update(selected)
+                        # logging.info(
+                        #     f"[Training/UniformMB] epoch={epoch+1} batch={bi+1}/{num_batches_mlp} "
+                        #     f"classes={[c + self._known_classes for c in selected]} "
+                        #     f"samples_per_cls={samples_per_cls_in_batch} batch_size={len(selected)*samples_per_cls_in_batch}"
+                        # )
+                        yield torch.cat(xs, 0), torch.cat(ys, 0)
+                    # logging.info(
+                    #     f"[Training/UniformMB] epoch={epoch+1} covered {len(classes_seen)}/{num_new_cls} classes "
+                    #     f"over {num_batches_mlp} batches ({n_cls_per_batch} cls/batch, {samples_per_cls_in_batch} samples/cls)"
+                    # )
+
+                batch_iter = tqdm(_mlp_batch_iter(), total=num_batches_mlp, desc=f"Epoch {epoch+1}/{epochs}", leave=False)
+            else:
+                def _std_batch_iter():
+                    for _, (_, _, xb, yb) in enumerate(train_loader):
+                        yb = torch.where(yb - self._known_classes >= 0, yb - self._known_classes, -100)
+                        yield xb, yb
+                batch_iter = tqdm(_std_batch_iter(), total=len(train_loader), desc=f"Epoch {epoch+1}/{epochs}", leave=False)
+
+            for batch_num, (x, y) in enumerate(batch_iter):
                 x, y = x.cuda(), y.cuda()
-                y = torch.where(
-                    y - self._known_classes >= 0,
-                    y - self._known_classes,
-                    -100
-                )
 
                 z = self.model.get_features(x)
                 logits = self.model.classifier.heads[-1](z)
-                loss = F.cross_entropy(logits, y, ignore_index=-100)
+                ce_loss = F.cross_entropy(logits, y, ignore_index=-100)
+                loss = ce_loss
 
-                if use_reg:
+                if use_reg and (batch_num % train_reg_at_each_n_batch == 0):
+                    n_old = self._known_classes
                     reg_loss = torch.tensor(0.0, device="cuda")
-                    for l in train_feature_at_layer:
-                        samples, target = reg_samples_cpu[l]
-                        idx = torch.randint(0, samples.shape[0], (train_reg_batch_size,))
-                        chunk        = samples[idx].cuda(non_blocking=True)
-                        chunk_target = target[idx].cuda(non_blocking=True)
-                        proj = self.model.forward_from_block(chunk, l + 1)
-                        reg_loss = reg_loss + F.mse_loss(proj, chunk_target)
+                    classes = torch.randperm(n_old)[:N].tolist()
+                    chunk = torch.cat([self._sampler.sample(c, L, K) for c in classes], dim=0).cuda(non_blocking=True)  # (N*K, T, D)
+                    proj = self.model.forward_from_block(chunk, L + 1)
 
-                    loss = loss + train_reg_weight * reg_loss / len(train_feature_at_layer)
+                    if train_reg_loss == "log_likelihood":
+                        means = torch.cat([self._sampler.get_cls_mean(c, "final").unsqueeze(0).expand(K, -1) for c in classes], dim=0).cuda(non_blocking=True)  # (N*K, D)
+                        var = torch.cat([self._sampler.get_sigma(c, "final").clamp(min=1e-3).pow(2).unsqueeze(0).expand(K, -1) for c in classes], dim=0).cuda(non_blocking=True)  # (N*K, D)
+                        reg_loss = reg_loss + F.gaussian_nll_loss(proj, means, var)
+                        if lam2 > 0:
+                            proj_by_class = proj.view(len(classes), K, -1)  # (N, K, D)
+                            diff = proj_by_class.unsqueeze(2) - proj_by_class.unsqueeze(1)  # (N, K, K, D)
+                            mse_class = diff.pow(2).mean()
+                            reg_loss = reg_loss + lam2 * mse_class
+                            total_intra_loss += mse_class.item() * len(y)
+                    else:
+                        chunk_target = torch.cat([self._sampler.sample(c, "final", K).squeeze(1) for c in classes], dim=0).cuda(non_blocking=True)  # (N*K, D)
+                        if train_reg_loss == "l1":
+                            reg_loss = reg_loss + F.l1_loss(proj, chunk_target)
+                        elif train_reg_loss == "smooth_l1":
+                            reg_loss = reg_loss + F.smooth_l1_loss(proj, chunk_target)
+                        elif train_reg_loss == "cosine":
+                            reg_loss = reg_loss + (1 - F.cosine_similarity(proj, chunk_target, dim=-1)).mean()
+                        elif train_reg_loss == "normalized_smooth_l1":
+                            proj_n = F.normalize(proj, dim=-1)
+                            tgt_n  = F.normalize(chunk_target, dim=-1)
+                            reg_loss = reg_loss + F.smooth_l1_loss(proj_n, tgt_n)
+                        elif train_reg_loss == "normalized_l2":
+                            proj_n = F.normalize(proj, dim=-1)
+                            tgt_n  = F.normalize(chunk_target, dim=-1)
+                            reg_loss = reg_loss + F.mse_loss(proj_n, tgt_n)
+                        elif train_reg_loss == "cosine_magnitude":
+                            cos = (1 - F.cosine_similarity(proj, chunk_target, dim=-1)).mean()
+                            mag = F.mse_loss(proj.norm(dim=-1), chunk_target.norm(dim=-1))
+                            reg_loss = reg_loss + cos + train_reg_mag_weight * mag
+                        else:
+                            reg_loss = reg_loss + F.mse_loss(proj, chunk_target)
+
+                    loss = loss + lam * reg_loss
                     total_reg_loss += reg_loss.item() * len(y)
 
                 optimizer.zero_grad()
@@ -528,30 +494,24 @@ class Learner:
                 optimizer.step()
 
                 total_loss += loss.item() * len(y)
+                total_ce_loss += ce_loss.item() * len(y)
                 total_acc += (logits.argmax(dim=1) == y).sum().item()
                 total += len(y)
 
             scheduler.step()
-            if epoch % 5 == 4 or epoch == epochs - 1:
-                logging.info(
-                    f"[Training] Epoch {epoch + 1}/{epochs}, "
-                    f"Total Loss: {total_loss / total:.4f}, "
-                    f"Reg Loss: {total_reg_loss / total:.4f}, "
-                    f"Acc: {total_acc / total:.4f}"
-                )
+            # if epoch % 5 == 4 or epoch == epochs - 1:
+            logging.info(
+                f"[Training] Epoch {epoch + 1}/{epochs}, "
+                f"Total Loss: {total_loss / total:.4f}, "
+                f"CE Loss: {total_ce_loss / total:.4f}, "
+                f"Reg Loss: {total_reg_loss / total:.4f}, "
+                f"Intra Loss: {total_intra_loss / total:.4f}, "
+                f"Acc: {total_acc / total:.4f}"
+            )
 
         torch.save(
             self.model.get_backbone_trainable_params(), self.backbone_checkpoint(self._cur_task)
         )
-        torch.save(
-            self.model.classifier.heads[self._cur_task].state_dict(),
-            self.mlp_checkpoint(self._cur_task),
-        )
-
-        if train_first_task_only:
-            # freeze backbone
-            for param in self.model.backbone.parameters():
-                param.requires_grad = False
 
     def merge(self):
         logging.info(f"[Merging] Task {self._cur_task}")
@@ -589,12 +549,9 @@ class Learner:
                     lamb=self._config["train_merge_coef"],
                     topk=self._config["train_merge_topk"],
                 )
-            elif self._config["train_merge"] == "rankwise":
-                rankwise_merge_lamb = self._config.get("train_merge_rankwise_lamb", 1.0)
-                backbone_params = merge_tasks_rankwise(
-                    task_params[0], task_params[1], is_perm_one=False, lamb=rankwise_merge_lamb, scale=1.0)
-                
-            self.load_backbone(backbone_params, load_norm=False)
+
+            model_use_norm = self._config.get("model_use_norm", False)    
+            self.load_backbone(backbone_params, load_norm=model_use_norm)
         
         logging.info(
             f"[Merging] Save merged backbone checkpoint for task {self._cur_task}"
@@ -744,9 +701,6 @@ class Learner:
         batch_size = self._config.get("train_ca_batch_size", 64)
         robust_weight_base = self._config.get("train_ca_robust_weight", 0.0)
 
-        for p in classifier.parameters():
-            p.requires_grad = False
-
         trainable_params = []
         for p in classifier.parameters():
             p.requires_grad = True
@@ -775,38 +729,6 @@ class Learner:
         indexes = torch.randperm(sampled_data.size(0))
         sampled_data = sampled_data[indexes]
         sampled_label = sampled_label[indexes]
-
-        # for epoch in range(epochs):
-        #     total_loss = total_acc = total = 0
-        #     num_samples = sampled_data.size(0)
-        #     num_iterations = (num_samples + batch_size - 1) // batch_size
-        #     for _iter in range(num_iterations):
-        #         start_idx = _iter * batch_size
-        #         end_idx = min((_iter + 1) * batch_size, num_samples)
-
-        #         x = sampled_data[start_idx:end_idx]
-        #         y = sampled_label[start_idx:end_idx]
-
-        #         logits = classifier(x)
-        #         loss = F.cross_entropy(logits, y)
-
-        #         if torch.isnan(loss):
-        #             continue
-
-        #         optimizer.zero_grad()
-        #         loss.backward()
-        #         optimizer.step()
-
-        #         bs = len(y)
-        #         total_loss += loss.item() * bs
-        #         total_acc += (logits.argmax(dim=1) == y).sum().item()
-        #         total += bs
-            
-        #     logging.info(
-        #         f"[Alignment] Epoch {epoch+1}/{epochs}, "
-        #         f"Loss: {total_loss/max(total, 1):.4f}, "
-        #         f"Accuracy: {total_acc/max(total, 1):.4f}"
-        #     )
 
         for epoch in range(epochs):
             total_loss = 0
@@ -891,6 +813,208 @@ class Learner:
                     f"Accuracy: {total_acc/max(total, 1):.4f}"
                 )
 
+    # def align(self, classifier):
+    #     logging.info(f"[Alignment] Task {self._cur_task}")
+
+    #     samples_per_cls = self._config.get("train_ca_samples_per_cls", 256)
+    #     mc_z_per_class = self._config.get("train_ca_mc_z_per_class", 64)
+    #     epochs = self._config.get("train_ca_epochs", 10)
+    #     batch_size = self._config.get("train_ca_batch_size", 64)
+    #     robust_weight = self._config.get("train_ca_robust_weight", 0.0)
+    #     align_minibatch_uniform = self._config.get("align_minibatch_uniform", False)
+    #     align_minibatch_num_cls = self._config.get("align_minibatch_num_cls", 2)
+
+    #     device = next(classifier.parameters()).device
+
+    #     for p in classifier.parameters():
+    #         p.requires_grad = True
+        
+    #     num_trainable = count_parameters(classifier, trainable=True)
+    #     logging.info(f"[Alignment] Num trainable parameters: {num_trainable:,}")
+
+    #     optimizer = optim.SGD(
+    #         classifier.parameters(), lr=1e-2, momentum=0.9, weight_decay=1e-4
+    #     )
+
+    #     # ------------------------------------------------------------------
+    #     # Build a fixed synthetic dataset S.
+    #     # Region/class i defines Z_i through the fixed Gaussian N(mu_i, Sigma_i).
+    #     # We sample S_i from each region once and keep them fixed across training.
+    #     # This matches the theorem much better than redefining regions on the fly.
+    #     # ------------------------------------------------------------------
+    #     sampled_data = []
+    #     sampled_label = []
+
+    #     dists = []
+    #     for cls_idx in range(self._total_classes):
+    #         mu_i = self._class_means[cls_idx].to(device).float()
+    #         cov_i = self._class_covs[cls_idx].to(device).float()
+    #         dist_i = MultivariateNormal(mu_i, cov_i)
+    #         dists.append(dist_i)
+
+    #         s_i = dist_i.sample((samples_per_cls,))  # S_i
+    #         sampled_data.append(s_i)
+    #         sampled_label.append(
+    #             torch.full((samples_per_cls,), cls_idx, dtype=torch.long, device=device)
+    #         )
+
+    #     sampled_data = torch.cat(sampled_data, dim=0)   # (n, D)
+    #     sampled_label = torch.cat(sampled_label, dim=0) # (n,)
+
+    #     # # Fixed partition anchors if you still want Voronoi regions.
+    #     # # But note: if Z_i is defined by N(mu_i, Sigma_i), the cleanest choice is:
+    #     # # S_i = samples drawn from dist_i, without extra Voronoi reassignment.
+    #     # partition_means = self._class_means[: self._total_classes].clone().detach().to(device).float()
+
+    #     n_total = sampled_data.size(0)
+
+    #     if align_minibatch_uniform:
+    #         n_cls_align = self._total_classes
+    #         n_cls_per_batch_align = min(align_minibatch_num_cls, n_cls_align)
+    #         spc_align = max(1, batch_size // n_cls_per_batch_align)
+    #         cls_data_align = []
+    #         for c in range(n_cls_align):
+    #             mask = sampled_label == c
+    #             cls_data_align.append(sampled_data[mask])
+    #         num_batches_align = max(1, n_total // batch_size)
+
+    #     for epoch in range(epochs):
+    #         total_loss = 0.0
+    #         total_ce_loss = 0.0
+    #         total_rb_loss = 0.0
+    #         total_acc = 0
+    #         total = 0
+
+    #         if align_minibatch_uniform:
+    #             cls_shuffled_align = [d[torch.randperm(len(d), device=device)] for d in cls_data_align]
+    #             sample_ptrs_align = [0] * n_cls_align
+    #             num_iterations = num_batches_align
+    #         else:
+    #             # Shuffle S each epoch for SGD on F(S,h)
+    #             perm = torch.randperm(n_total, device=device)
+    #             epoch_data = sampled_data[perm]
+    #             epoch_label = sampled_label[perm]
+    #             num_iterations = (n_total + batch_size - 1) // batch_size
+
+    #         for it in range(num_iterations):
+    #             if align_minibatch_uniform:
+    #                 cls_start = (it * n_cls_per_batch_align) % n_cls_align
+    #                 selected = [(cls_start + j) % n_cls_align for j in range(n_cls_per_batch_align)]
+    #                 xs, ys = [], []
+    #                 for c in selected:
+    #                     sz = len(cls_shuffled_align[c])
+    #                     p = sample_ptrs_align[c]
+    #                     idxs = torch.arange(p, p + spc_align) % sz
+    #                     chunk = cls_shuffled_align[c][idxs]
+    #                     sample_ptrs_align[c] = (p + spc_align) % sz
+    #                     xs.append(chunk)
+    #                     ys.append(torch.full((spc_align,), c, dtype=torch.long, device=device))
+    #                 x = torch.cat(xs, 0)
+    #                 y = torch.cat(ys, 0)
+    #             else:
+    #                 start = it * batch_size
+    #                 end = min((it + 1) * batch_size, n_total)
+    #                 x = epoch_data[start:end]
+    #                 y = epoch_label[start:end]
+    #             n_batch = y.size(0)
+
+    #             logits = classifier(x)
+    #             loss_vec = F.cross_entropy(logits, y, reduction="none")
+    #             base_loss = loss_vec.mean()
+
+    #             if torch.isnan(base_loss):
+    #                 continue
+
+    #             reg_loss = torch.tensor(0.0, device=device)
+
+    #             if robust_weight > 0:
+    #                 # ----------------------------------------------------------
+    #                 # Estimate:
+    #                 #   sum_i (n_i / n) * bar_epsilon_i(h)
+    #                 #
+    #                 # where
+    #                 #   bar_epsilon_i(h)
+    #                 #   = (1 / n_i) sum_{s in S_i} E_{z ~ Z_i} |l(h,z) - l(h,s)|
+    #                 #
+    #                 # We do this by:
+    #                 #   1) taking the current batch samples x as candidate s
+    #                 #   2) grouping them by region i
+    #                 #   3) drawing fresh Monte Carlo samples z ~ Z_i
+    #                 #   4) computing all pairwise |l(z) - l(s)| for that region
+    #                 #
+    #                 # This is faithful to Theorem 5.
+    #                 # ----------------------------------------------------------
+
+    #                 unique_classes = torch.unique(y)
+
+    #                 for class_i in unique_classes.tolist():
+    #                     s_mask = (y == class_i)
+    #                     x_i = x[s_mask]
+    #                     y_i = y[s_mask]
+
+    #                     if x_i.size(0) == 0:
+    #                         continue
+
+    #                     # # Optional: strict geometric membership under a fixed partition.
+    #                     # # If you want theorem-faithful regions and your Z_i is "Gaussian i",
+    #                     # # skip this block and use all x_i directly.
+                        
+    #                     # with torch.no_grad():
+    #                     #     dist_to_centers = torch.cdist(x_i, partition_means)
+    #                     #     vor_idx = torch.argmin(dist_to_centers, dim=1)
+    #                     # keep = (vor_idx == class_i)
+    #                     # x_i = x_i[keep]
+    #                     # y_i = y_i[keep]
+    #                     # if x_i.size(0) == 0:
+    #                     #     continue
+
+    #                     # Losses l(h,s), s in S_i
+    #                     logits_s = classifier(x_i)
+    #                     loss_s = F.cross_entropy(logits_s, y_i, reduction="none")  # (n_i_batch,)
+
+    #                     # Monte Carlo samples z ~ Z_i
+    #                     z_i = dists[class_i].sample((mc_z_per_class,))  # (m, D)
+    #                     y_z = torch.full(
+    #                         (mc_z_per_class,), class_i, dtype=torch.long, device=device
+    #                     )
+
+    #                     logits_z = classifier(z_i)
+    #                     loss_z = F.cross_entropy(logits_z, y_z, reduction="none")  # (m,)
+
+    #                     # Pairwise absolute differences:
+    #                     #   (1/n_i) sum_s (1/m) sum_z |l(z) - l(s)|
+    #                     pairwise_abs = torch.abs(loss_z[:, None] - loss_s[None, :])  # (m, n_i_batch)
+    #                     bar_eps_i_hat = pairwise_abs.mean()
+
+    #                     # Use the actual effective weight from the current S.
+    #                     # Since S was built with equal samples_per_cls per class,
+    #                     # n_i / n is exactly 1 / total_classes if you do NOT
+    #                     # discard samples afterwards.
+    #                     region_weight = float(samples_per_cls) / float(n_total)
+
+    #                     reg_loss = reg_loss + region_weight * bar_eps_i_hat
+
+    #             loss = base_loss + robust_weight * reg_loss
+
+    #             optimizer.zero_grad()
+    #             loss.backward()
+    #             optimizer.step()
+
+    #             total_loss += loss.item() * n_batch
+    #             total_ce_loss += base_loss.item() * n_batch
+    #             total_rb_loss += reg_loss.item() * n_batch
+    #             total_acc += (logits.argmax(dim=1) == y).sum().item()
+    #             total += n_batch
+
+    #         if epoch % 5 == 4 or epoch == epochs - 1:
+    #             logging.info(
+    #                 f"[Alignment] Epoch {epoch + 1}/{epochs}, "
+    #                 f"Base Loss: {total_ce_loss / max(total, 1):.4f}, "
+    #                 f"Robust Term: {total_rb_loss / max(total, 1):.4f}, "
+    #                 f"Total Loss: {total_loss / max(total, 1):.4f}, "
+    #                 f"Accuracy: {total_acc / max(total, 1):.4f}"
+    #             )
+
     def prefix(self):
         prefix_parts = [
             str(self._config["seed"]),
@@ -909,10 +1033,10 @@ class Learner:
             f"_{task}.pt" if task >= 0 else "_base.pt"
         )
         return os.path.join(CHECKPOINT_DIR, filename)
-    
-    def mlp_checkpoint(self, task):
-        filename = f"{self.prefix()}_mlp_{task}.pt"
-        return os.path.join(CHECKPOINT_DIR, filename)
+
+    def model_checkpoint(self):
+        filename = f"{self.prefix()}_model.pt"
+        return os.path.join(CHECKPOINT_DIR, filename) 
 
     def merged_checkpoint(self, task):
         filename = f"{self.prefix()}_merged_{self._config['train_merge']}_{task}.pt"
@@ -934,11 +1058,11 @@ class Learner:
 DATA_TABLE = {
     # "cifar224": [(10, 10, 10)],
     # "imagenetr": [(10, 20, 20)],
-    "imageneta": [(10, 20, 20)],
+    # "imageneta": [(10, 20, 20)],
     # "cub": [(10, 20, 20)],
     # "omnibenchmark": [(10, 30, 30)],
     # "vtab": [(5, 10, 10)],
-    # "cars": [(10, 16, 20)]
+    "cars": [(10, 16, 20)]
 }
 
 BASE_CONFIG = {
@@ -983,9 +1107,6 @@ def run_single_experiment(dataset_name, config_name, experiment_config, seed):
     )
 
     config.update(experiment_config)
-    
-    if dataset_name == "vtab" or dataset_name == "cars":
-        config["train_merge_rankwise_lamb"] = 0.15
     
     if dataset_name == "imageneta":
         config["train_batch_size"] = 48
@@ -1045,27 +1166,39 @@ def run_experiments():
             "train_batch_size": 64,
             "model_backbone": "vit_base_patch16_224_lora",
             "model_outdim": 768,
-            "model_use_norm": False,
+            "model_use_norm": True,
             "model_lora_r": 64,
             "model_lora_alpha": 128,
+            "model_classifier_norm_layer": "ln", # "ln" | "bn"
             "ffn_num": 64,
             "model_lora_dropout": 0.0,
             "model_lora_target_modules": ["qkv"],
             "model_classifier": ["mlp"],
 
             "train_prefix": "exp16",
+            "train_stop_at_task": 4,
 
-            "train_feature_at_layer": [8],
+            "train_minibatch_uniform": False,
+            "train_minibatch_num_cls": 4,
+            "align_minibatch_uniform": False,
+            "align_minibatch_num_cls": 4,
 
-            "train_first_task_only": False,
-            "train_incremental": False,
+            "train_feature_at_layer": 8,    # L
+            "train_reg_weight": 1e-2,        # lambda
+            "train_reg_num_classes": 5,     # N
+            "train_reg_num_sampling": 16,   # K
+
+            "train_reg_loss": "log_likelihood", # "mse" | "l1" | "smooth_l1" | "cosine" | "normalized_smooth_l1" | "normalized_l2" | "cosine_magnitude"
+            
+            "train_reg_mag_weight": 1.0,  # weight for magnitude term in cosine_magnitude loss
+            "train_reg_at_each_n_batch": 1,
+
             "train_RP": False,
 
             "train_merge": "ties",
             "train_merge_coef": 1.0,
             "train_merge_topk": 100,
-            "train_merge_incremental": False,
-            "train_merge_rankwise_lamb": 0.85,
+            "train_merge_incremental": True,
 
             "train_ca": True,
             "train_ca_load_checkpoint_from_first_task": False,

@@ -1,3 +1,4 @@
+from typing import Dict
 import torch
 from torch import nn
 import torch.nn.functional as F
@@ -460,5 +461,140 @@ class Model(nn.Module):
         total_params = count_parameters(self.backbone)
         return f"Backbone(trainable_params={trainable_params:,}, total_params={total_params:,}, percentage={trainable_params * 100 / total_params:.2f})"
 
+
+# =============================================================================
+
+
+# Feature Sampler =============================================================
+
+def _make_generator(class_idx: int, layer_key, n_samples: int, call_count: int = 0) -> torch.Generator:
+    """Deterministic per-call generator seeded from (class_idx, layer_key, n_samples, call_count).
+
+    call_count is incremented by the sampler on each sample() call, giving different
+    draws across training epochs while remaining fully reproducible for a given call index.
+    """
+    layer_key_int = layer_key if isinstance(layer_key, int) else sum(ord(c) for c in str(layer_key))
+    seed = (class_idx * 2654435761 ^ layer_key_int * 40503 ^ n_samples * 12345 ^ call_count * 6700417) % (2 ** 32)
+    gen = torch.Generator()
+    gen.manual_seed(seed)
+    return gen
+
+
+class IntermediateFeatureSampler:
+    """Store per-class, per-layer Gaussian statistics and draw synthetic samples.
+
+    Feature shapes:
+      - Intermediate layers : (N, T, D)  — N samples, T tokens (e.g. 197), D dims
+      - Final layer         : (N, D)     — stored as (N, 1, D) internally
+
+    Stored per layer_key (int or "final"):
+      _means[layer_key]  : (num_classes, T, D)
+      _sigmas[layer_key] : (num_classes, T, D)
+    """
+
+    def __init__(
+        self,
+        total_classes: int,
+        token_length: int = 197,
+        feature_dim: int = 768,
+    ) -> None:
+        self.total_classes = total_classes
+        self.token_length = token_length
+        self.feature_dim = feature_dim
+
+        self._means  = {}  # layer_key -> (total_classes, T, D)
+        self._sigmas = {}  # layer_key -> (total_classes, T, D)
+
+        self._sample_counts: Dict[tuple, int] = {}  # (class_idx, layer_key) -> call count
+
+    # ------------------------------------------------------------------
+    # Statistics
+    # ------------------------------------------------------------------
+
+    def update(self, features: torch.Tensor, class_idx: int, layer_key) -> None:
+        """Compute and store mean/sigma for class_idx at layer_key.
+
+        Args:
+            features:  (N, T, D) for intermediate layers, (N, D) for the final layer.
+            class_idx: Global class index.
+            layer_key: Layer identifier (int index or "final").
+        """
+        features = features.detach().cpu().float()
+        if features.ndim == 2:
+            features = features.unsqueeze(1)   # (N, 1, D)
+
+        _, T, D = features.shape
+        self._ensure_capacity(layer_key, T, D)
+
+        sigma, mean = torch.std_mean(features, dim=0, correction=1)
+        self._means[layer_key][class_idx] = mean
+        self._sigmas[layer_key][class_idx] = sigma.nan_to_num(0.0)
+
+    # ------------------------------------------------------------------
+    # Sampling
+    # ------------------------------------------------------------------
+
+    def sample(self, class_idx: int, layer_key, n_samples: int) -> torch.Tensor:
+        """Draw n_samples synthetic features from per-element Gaussian.
+
+        Each call increments an internal counter so repeated calls produce
+        different (but reproducible) samples.
+
+        Returns:
+            (n_samples, T, D) on CPU.
+        """
+        key = (class_idx, layer_key)
+        call_count = self._sample_counts.get(key, 0)
+        self._sample_counts[key] = call_count + 1
+
+        mean  = self._means[layer_key][class_idx]
+        sigma = self._sigmas[layer_key][class_idx]
+        gen = _make_generator(class_idx, layer_key, n_samples, call_count)
+        return mean.unsqueeze(0) + torch.randn(n_samples, *mean.shape, generator=gen) * sigma.unsqueeze(0)
+
+    # ------------------------------------------------------------------
+    # Accessors
+    # ------------------------------------------------------------------
+
+    def get_mean(self, class_idx: int, layer_key) -> torch.Tensor:
+        """(T, D)"""
+        return self._means[layer_key][class_idx]
+
+    def get_cls_mean(self, class_idx: int, layer_key) -> torch.Tensor:
+        """CLS token mean — (D,)."""
+        return self._means[layer_key][class_idx][0]
+
+    def get_sigma(self, class_idx: int, layer_key) -> torch.Tensor:
+        """CLS token sigma — (D,)."""
+        return self._sigmas[layer_key][class_idx][0]
+
+    def expand_to(self, new_total_classes: int) -> None:
+        """Grow storage to accommodate more classes (preserves existing data)."""
+        for key in list(self._means.keys()):
+            old_m = self._means[key]
+            if new_total_classes <= old_m.shape[0]:
+                continue
+            T, D = old_m.shape[1], old_m.shape[2]
+            new_m = torch.zeros(new_total_classes, T, D)
+            new_m[:old_m.shape[0]] = old_m
+            self._means[key] = new_m
+
+            # _sigmas is always allocated for all strategies.
+            old_s = self._sigmas[key]
+            new_s = torch.zeros(new_total_classes, T, D)
+            new_s[:old_s.shape[0]] = old_s
+            self._sigmas[key] = new_s
+
+        self.total_classes = new_total_classes
+
+    # ------------------------------------------------------------------
+    # Private
+    # ------------------------------------------------------------------
+
+    def _ensure_capacity(self, layer_key, T: int, D: int) -> None:
+        if layer_key not in self._means:
+            self._means[layer_key] = torch.zeros(self.total_classes, T, D)
+            # _sigmas always allocated — needed for patch tokens in all strategies.
+            self._sigmas[layer_key] = torch.zeros(self.total_classes, T, D)
 
 # =============================================================================
